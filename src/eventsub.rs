@@ -161,12 +161,12 @@ impl EventSub {
             "sending POST request for creation of event 'stream.online' for channel {}:\n\
             \tAuthorization: {}, Client-Id: {}\n\
             \t{:?}",
-            channel, &self.auth.auth, &self.auth.client_id, serde_json::to_string(&body)
+            channel, self.auth.auth(), self.auth.client_id(), serde_json::to_string(&body)
         );
 
         let mut x = surf::post(EVENTSUB_API)
-            .header("Authorization", &self.auth.auth)
-            .header("Client-Id", &self.auth.client_id)
+            .header("Authorization", self.auth.auth())
+            .header("Client-Id", self.auth.client_id())
             .body_json(&body)
             .unwrap()
             .send()
@@ -194,8 +194,8 @@ pub async fn get(auth: &HelixAuth) -> surf::Result<Vec<Subscription>> {
     }
 
     let sub: SubRetDes = surf::get(EVENTSUB_API)
-        .header("Authorization", &auth.auth)
-        .header("Client-Id", &auth.client_id)
+        .header("Authorization", auth.auth())
+        .header("Client-Id", auth.client_id())
         .send()
         .await?
         .body_json()
@@ -215,8 +215,8 @@ pub async fn delete(auth: &HelixAuth, sub: Subscription) -> Result<(), ()> {
     
         return Ok( surf::delete(EVENTSUB_API)
             .query( &Id { id: sub.id() } )?
-            .header("Authorization", &auth.auth)
-            .header("Client-Id", &auth.client_id)
+            .header("Authorization", auth.auth())
+            .header("Client-Id", auth.client_id())
             .send()
             .await? );
     }

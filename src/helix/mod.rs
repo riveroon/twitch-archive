@@ -8,7 +8,7 @@ mod auth;
 pub use auth::*;
 
 pub struct Helix {
-
+    //user_buf: Vec<UserCredentials>
 }
 
 impl Helix {

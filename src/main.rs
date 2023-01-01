@@ -1,134 +1,151 @@
 mod eventsub;
-pub use eventsub::*;
-
-mod subscription;
-pub use subscription::Subscription;
+use eventsub::event::*;
 
 mod helix;
-pub use helix::HelixAuth;
+use helix::{HelixAuth, User};
 
 mod args;
-pub use args::*;
+use args::*;
 
-use std::{fmt, time::{UNIX_EPOCH, Duration}, net::SocketAddr};
-use futures::{try_join, executor::block_on, future::join_all, StreamExt};
+mod filename;
 
-use async_process::Command;
+use futures::TryStreamExt;
 
-use serde::Deserialize;
-#[derive(fmt::Debug, Deserialize)]
-struct Online {
-    id: String,
-    #[serde(rename = "broadcaster_user_id")]
-    streamer_id: String,
-    #[serde(rename = "broadcaster_user_login")]
-    streamer_login: String,
-    started_at: String
-}
+use async_once_cell::OnceCell;
+static FORMATTER: OnceCell<filename::Formatter> = OnceCell::new();
 
 async fn cmd(program: &str, args: &[&str]) -> Result<String, ()> {
+    use std::time::{UNIX_EPOCH, Duration};
+
     log::trace!("running command :{} {:?}", program, args);
-    let cmd = Command::new(&program)
+    let cmd = async_process::Command::new(&program)
         .args(args)
         .output().await.unwrap();
 
     if cmd.status.success() { return Ok(String::from_utf8(cmd.stdout).unwrap()); }
 
     let t = UNIX_EPOCH.elapsed().unwrap_or(Duration::ZERO).as_secs();
-    let outlog = format!("ta-{}-0.log", t);
-    let errlog = format!("ta-{}-1.log", t);
+    let (outl, errl) = (format!("ta-{}-0.log", t), format!("ta-{}-1.log", t));
 
-    let l0 = async_std::fs::write(&outlog, &cmd.stdout);
-    let l1 = async_std::fs::write(&errlog, &cmd.stderr);
-    try_join!(l0, l1).unwrap();
+    let l0 = async_std::fs::write(&outl, &cmd.stdout);
+    let l1 = async_std::fs::write(&errl, &cmd.stderr);
+    futures::try_join!(l0, l1).unwrap();
 
     log::error!(
         "{}: command exited with status {:?}\n\
         \tlog files: {}, {}",
-        program, cmd.status.code(), outlog, errlog
+        program, cmd.status.code().unwrap_or(-1), outl, errl
     );
     return Err(());
 }
 
-async fn download(event: &Online, chn: &Channel) -> Result<(), ()> {
-    fn pretty_date(date: &str) -> String {
-        date[2..].split_once(':')
-            .expect(&format!("unknown date string {}", date)).0
-            .replace("-", "")
-    }
+async fn download(stream: &helix::Stream, chn: &ChannelSettings) -> Result<(), ()> {
+    use async_std::{fs, path};
 
-    log::debug!("downloading stream for channel {}", event.streamer_id);
+    let filename = FORMATTER.get().unwrap().format(stream);
+    if let Some(x) = path::Path::new(&filename).parent() {
+        fs::create_dir_all(x).await
+            .map_err(|e| {
+                eprintln!("could not create parent directory for download file: {}", e);
+            })?;
+    }
+    log::debug!("downloading stream for channel {}: {}", stream.user(), filename);
 
     let url = cmd("youtube-dl",
-        &["-g", "-f", &chn.format, &format!("https://twitch.tv/{}", &event.streamer_login)]).await?;
-
-    let filename = format!(
-        "file:{}-{}-{}.ts",
-        &event.streamer_login,
-        &pretty_date(&event.started_at),
-        &event.id
-    );
+        &["-g", "-f", &chn.format, &format!("https://twitch.tv/{}", stream.user().login())]).await?;
 
     cmd("ffmpeg", &["-hide_banner", "-n", "-i", &url, "-c", "copy", &filename]).await?;
     return Ok(());
 }
 
-use std::collections::HashMap;
 async fn archive(
     auth: HelixAuth,
-    addr: SocketAddr,
-    channels: HashMap<Id, Channel>
+    port: u16,
+    channels: impl IntoIterator<Item = (UserCredentials, ChannelSettings)>
 ) {
+    use futures::future::join_all;
+    use async_std::net::{SocketAddr, IpAddr, Ipv4Addr};
+
     let tunnel = ngrok::builder()
           .https()
-          .port(8080)
+          .port(port)
           .run().unwrap();
 
     let public_url = tunnel.public_url().unwrap();
     log::info!("ngrok tunnel started at: {}", &public_url);
 
-    let (events, rx) = EventSub::new(addr, public_url, auth).await;
-    join_all(channels.keys().map(|x| {
-        let events = &events;
-        async move {
-            if let Err(e) = events.online(x).await {
-                log::error!(
-                    "error while subscribing to event 'stream.online' for channel {}:\n\t{:?}",
-                    x, e
-                );
-            } else { log::debug!("subscribed to event 'stream.online' for channel {}", x) }
-        }
-    })).await;
+    let events = eventsub::EventSub::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), 
+        public_url, auth.clone()
+    ).await;
 
-    log::debug!("listening for events...");
-    rx.for_each_concurrent(None, |(event, _)| async {
-        match event {
-            Message::Notification(noti) => {
-                match serde_json::from_str::<Online> (noti.get()) {
-                    Ok(o) => {
-                        if let Some(x) = channels.get(&o.streamer_id) {
-                            if download(&o, x).await.is_err() {
-                                log::error!("download failed\n\t{:?}", o);
-                            }
-                        } else {
-                            log::warn!("received unknown 'stream.online' event for streamer {:?}", o.streamer_id);
+    join_all(channels.into_iter().map(|(cred, settings)| {
+        let auth = &auth;
+        let events = &events;
+        async move { loop {
+            let tmp;
+            let id = match cred {
+                UserCredentials::Full { ref id, ..} => id.as_str(),
+                UserCredentials::Id { ref id } => id.as_str(),
+                UserCredentials::Login { ref login } => {
+                    tmp = User::from_login(login, auth).await;
+                    match tmp {
+                        Ok(ref x) => x.id(),
+                        Err(ref e) => {
+                            log::error!("could not retrieve user with login {:?}: {}", login, e);
+                            return;
                         }
-                    },
-                    Err(e) => {
-                        log::error!("error while parsing event: {:?}", e);
-                        return;
                     }
                 }
+            };
+
+            let sub = match events.subscribe::<stream::Online> (stream::OnlineCond::from_id(id)).await {
+                Ok(x) => {
+                    log::debug!("subscribed to event 'stream.online' for user {}", id);
+                    x
+                },
+                Err(e) => {
+                    log::error!("could not subscribe to event 'stream.online' for user {}: {}", &id, e);
+                    return;
+                }
+            };
+
+            loop {
+                let msg = match sub.recv().await {
+                    Ok(Some(x)) => x,
+                    Ok(None) => {
+                        log::warn!("subscription revoked: {:?}", sub.status());
+                        break;
+                    },
+                    Err(e) => {
+                        log::error!("unexpected error while trying to recieve message from webhook: {}", e);
+                        break;
+                    }
+                };
+
+                let stream = match helix::get_streams(auth.clone(), std::iter::once(
+                    helix::StreamFilter::User( &msg.user() )
+                )).try_next().await {
+                    Ok(Some(x)) => x,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        log::error!("could not fetch stream object from endpoint: {}", e);
+                        continue;
+                    }
+                };
+
+                if download(&stream, &settings).await.is_err() {
+                    log::error!("download failed!");
+                }
             }
-            Message::Revocation => ()
-        };
-    }).await;
+        }
+    } } )).await;
 }
 
 async fn run() {
-    let (cid, csec, addr, ch) = parse_args();
+    let (cid, csec, port, fname, ch) = parse_args();
 
-    let auth = match HelixAuth::new(cid, &csec).await {
+    let auth = match HelixAuth::new(cid, csec).await {
         Ok(x) => x,
         Err(e) => {
             log::error!("error while obtaining helix authorization:\n\t{:?}", e);
@@ -136,12 +153,16 @@ async fn run() {
         }
     };
 
+    FORMATTER.get_or_init(async { fname }).await;
+
     eventsub::wipe(&auth).await.expect("error while wiping leftover subscriptions");
 
-    archive(auth, addr, ch).await;
+    archive(auth, port, ch).await;
 }
 
 fn main() {
+    use futures::executor::block_on;
+
     env_logger::init();
     block_on(run());
 }

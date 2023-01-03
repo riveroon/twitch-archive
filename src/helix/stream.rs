@@ -63,14 +63,18 @@ pub enum StreamFilter<'a> {
     Language(&'a str),
 }
 
-use url::Url;
-use futures::{TryStream, StreamExt};
-use std::collections::VecDeque;
-use surf::{http, RequestBuilder};
+
+use futures::TryStream;
 pub fn get_streams<'a, T> (auth: HelixAuth, filter: T) -> impl TryStream<Ok = Stream, Error = surf::Error> + Unpin
 where
     T: IntoIterator<Item = StreamFilter<'a>>
 {
+    use url::Url;
+    use futures::StreamExt;
+    use std::collections::VecDeque;
+    use surf::{http, StatusCode, RequestBuilder};
+
+
     #[derive(Deserialize)]
     struct Pagination { cursor: Option<Box<str>> }
 
@@ -99,11 +103,9 @@ where
         |(state, auth)| async {
             let (mut data, page) = match state {
                 State::Init(url) => {
-                    let res = RequestBuilder::new(http::Method::Get, *url)
-                        .header("Authorization", auth.auth())
-                        .header("Client-Id", auth.client_id())
-                        .recv_json::<GetStreamsRes> ().await?;
-
+                    let res: GetStreamsRes = auth.send(
+                        RequestBuilder::new(http::Method::Get, *url).build()
+                    ).await?.body_json().await?;
                     (res.data.into_iter(), res.pagination)
                 },
                 State::Next(data, page) => (data, page)
@@ -119,11 +121,11 @@ where
                 after: &'a str,
             }
 
-            let res: GetStreamsRes = surf::get(STREAM_API)
-                .header("Authorization", auth.auth())
-                .header("Client-Id", auth.client_id())
-                .query(&Query { first: 100, after: &cursor })?
-                .recv_json().await?;
+            let res: GetStreamsRes = auth.send(
+                surf::get(STREAM_API)
+                    .query(&Query { first: 100, after: &cursor })?
+                    .build()
+            ).await?.body_json().await?;
             
             let (mut data, page) = (res.data.into_iter(), res.pagination);
             

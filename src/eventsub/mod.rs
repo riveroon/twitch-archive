@@ -258,22 +258,11 @@ impl EventSub {
             T::name(), serde_json::to_string(&body)
         );
 
-        let mut x = surf::post(EVENTSUB_API)
-            .header("Authorization", self.auth.auth())
-            .header("Client-Id", self.auth.client_id())
-            .body_json(&body)
-            .unwrap()
-            .send()
-            .await?;
-
-        let body = x.body_bytes().await?;
-
-        log::trace!(
-            "response of POST request for event {:?}: {}\n\t{:?}",
-            T::name(), x.status(), std::str::from_utf8(&body)
-        );
-
-        let res: CreateSubRes = serde_json::from_slice(&body)?;
+        let res: CreateSubRes = self.auth.send(
+            surf::post(EVENTSUB_API)
+                .body_json(&body).unwrap()
+                .build()
+        ).await?.body_json().await?;
 
         let [s] = res.data;
 
@@ -303,13 +292,9 @@ pub async fn get(auth: &HelixAuth) -> surf::Result<Vec<SubInner>> {
         data: Vec<SubInner>
     }
 
-    let sub: SubRetDes = surf::get(EVENTSUB_API)
-        .header("Authorization", auth.auth())
-        .header("Client-Id", auth.client_id())
-        .send()
-        .await?
-        .body_json()
-        .await?;
+    let sub: SubRetDes = auth.send(
+        surf::get(EVENTSUB_API).build()
+    ).await?.body_json().await?;
 
     log::debug!("retrieved {} subscriptions", sub.data.len());
 
@@ -317,21 +302,16 @@ pub async fn get(auth: &HelixAuth) -> surf::Result<Vec<SubInner>> {
 }
 
 pub async fn delete(auth: &HelixAuth, sub: SubInner) -> surf::Result<()> {
-    async fn _delete(auth: &HelixAuth, sub: &SubInner) -> surf::Result<surf::Response> {
-        #[derive(Serialize)]
-        struct Id<'a> {
-            id: &'a str
-        }
-    
-        return Ok( surf::delete(EVENTSUB_API)
-            .query( &Id { id: sub.id() } )?
-            .header("Authorization", auth.auth())
-            .header("Client-Id", auth.client_id())
-            .send()
-            .await? );
+    #[derive(Serialize)]
+    struct Id<'a> {
+        id: &'a str
     }
-    
-    let mut res =_delete(auth, &sub).await?;
+
+    let mut res = auth.send(
+        surf::delete(EVENTSUB_API)
+            .query( &Id { id: sub.id() } )?
+            .build()
+        ).await?;
     if res.status().is_success() { Ok(()) } else {
         log::error!("error while deleting subscription: recieved status {} for subscription {}", res.status(), sub.id());
         Err(surf::Error::from_str(res.status(), format!("failed to delete subscription {}: {:?}", sub.id(), res.body_string().await?)))

@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::{Instant, Duration}};
 
 use async_std::sync::Mutex;
+use futures::Future;
 use serde::Deserialize;
 use surf::{http::mime};
 
@@ -56,7 +57,6 @@ impl Inner {
 #[derive(Clone, Debug)]
 pub struct HelixAuth {
     inner: Arc<Mutex<(Inner, Box<str>)>>,
-    cache: Inner,
 }
 
 impl HelixAuth {
@@ -66,20 +66,55 @@ impl HelixAuth {
                 inner: Arc::new(Mutex::new(
                     (x.clone(), secret.into_boxed_str())
                 )),
-                cache: x
             }
         );
     }
 
-    fn has_expired(&self) -> bool { self.cache.has_expired() }
+    async fn has_expired(&self) -> bool { (&*self.inner.lock().await).0.has_expired() }
 
     pub async fn refresh(&mut self) -> surf::Result<()> {
         let (inner, secret) = &mut *self.inner.lock().await;
-        if *inner == self.cache { inner.refresh(secret).await? };
-        self.cache = inner.clone();
+        inner.refresh(secret).await?;
         return Ok(());
     }
 
-    pub fn auth(&self) -> &str { &self.cache.auth }
-    pub fn client_id(&self) -> &str { &self.cache.client_id }
+    pub async fn auth(&self) -> String { (&*self.inner.lock().await).0.auth.clone().into() }
+    pub async fn with_auth<F, T, Fut> (&self, mut f: F) -> T
+    where
+        F: FnMut(&str) -> Fut,
+        Fut: Future<Output = T>
+    {
+        let auth = &*(&*self.inner.lock().await).0.auth;
+        f(auth).await
+    }
+
+    pub async fn client_id(&self) -> String { (&*self.inner.lock().await).0.client_id.clone().into() }
+    pub async fn with_client_id<F, T, Fut> (&self, mut f: F) -> T
+    where
+        F: FnMut(&str) -> Fut,
+        Fut: Future<Output = T>
+    {
+        let client_id = &*(&*self.inner.lock().await).0.client_id;
+        f(client_id).await
+    }
+
+    pub async fn send (&self, mut req: surf::Request) -> surf::Result<surf::Response> {
+        async fn _send(auth: &HelixAuth, mut req: surf::Request, refresh: bool) -> surf::Result<surf::Response> {
+            let lock = &mut *auth.inner.lock().await;
+            if refresh { lock.0.refresh(&*lock.1).await?; }
+            req.insert_header("Authorization", &*lock.0.auth);
+            req.insert_header("Client-Id", &*lock.0.client_id);
+            drop(lock);
+            return surf::client().send(req).await;
+        }
+
+        use surf::StatusCode;
+        let b = req.clone();
+        let mut res = _send(self, req, false).await?;
+        
+        if res.status() != StatusCode::Unauthorized { return Ok(res) };
+
+        log::info!("received status code 401; refreshing auth");
+        return _send(self, b, true).await;
+    }
 }

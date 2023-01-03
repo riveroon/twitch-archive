@@ -41,6 +41,7 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
                 \r  -f, --file-name      <str>  Formats the output file name.\n\
                 \r                              See below for more information.\n\
                 \r                              (Default: %Sl\\[%si] %st.ts)
+                \r  --version                   Prints the program version.\n\
                 \r  -h, --help                  Prints this help message.\n\
                 \n\
                 SUBSCRIPTION FORMAT:\n\
@@ -49,14 +50,10 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
                 \n\
                 channel <object>\n\
                 \r  'id':         <str>     The streamer id to subscribe to.\n\
+                \r  'login':      <str>     The streamer login to subscribe to.\n\
                 \r  'format':     <str>     The download quality the stream should be downloaded at.\n\
                 \r                          This value should be either 'video' for videos,\n\
                 \r                          or 'audio' for audios. (Default: 'video')\n\
-                \r  'transcode':  <object>  The quality that the video should be transcoded to;\n\
-                \r                          This value will be ignored if the 'format' value\n\
-                \r                          is set to 'audio'. (Default: {{}})\n\
-                \r                          NOTE: This feature is currently unimplemented.\n\
-                \r                          All values will be ignored.\n\
                 \n\
                 The subscription list file is a json list of the above channel object.\n\
                 \n\
@@ -64,6 +61,7 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
                 \r  [\n\
                 \r    {{\"id\": \"0000000\"}},\n\
                 \r    {{\"id\": \"0000001\", \"format\": \"audio\"}},\n\
+                \r    {{\"login\": \"twitch\"}},
                 \r  ]\n\
                 \n\
                 FILE NAME FORMATTING:\n\
@@ -85,7 +83,7 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
                 \r  %si: Stream ID\n\
                 \r  %st: Stream Name\n\
                 \n\
-                \r  %%: Escape (\"%\")\
+                \r  %%: Escape (\"%\")\n\
                 ", name);
 
     fn err(t: &str, x: &str) -> String {
@@ -116,6 +114,12 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
                 subs = Some(fs::read(&path).expect(&format!("failed to read file {:?}", &path)));
             },
             "-f" | "--file-name" => fname = argv.next().expect(&err("str", &x)),
+            "--version" => {
+                println!("
+                twitch-archive v0.2.0\n\
+                Author: riveroon (github.com/riveroon)");
+                std::process::exit(0);
+            }
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);

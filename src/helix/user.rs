@@ -171,10 +171,7 @@ async fn _get_user(auth: &HelixAuth, users: &[UserCredentials<'_>]) -> surf::Res
             })
         );
 
-    let res: GetUserRes = RequestBuilder::new(http::Method::Get, url)
-        .header("Authorization", auth.auth())
-        .header("Client-Id", auth.client_id())
-        .recv_json().await?;
+    let res: GetUserRes = auth.send(surf::get(url).build()).await?.body_json().await?;
 
     return Ok(res.data.into_iter().map(|UserDes { credentials, details }|
         User { credentials, details: OnceCell::new_with(Some(Box::new(details))) }

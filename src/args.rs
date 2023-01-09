@@ -23,7 +23,7 @@ pub enum UserCredentials {
     Login { login: String },
 }
 
-pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, ChannelSettings)>) {
+pub fn parse_args() -> (String, String, u16, Formatter, Option<Box<str>>, Vec<(UserCredentials, ChannelSettings)>) {
     let mut argv = env::args();
     let name = argv.next().unwrap();
     let print_help = || println!("\
@@ -33,14 +33,17 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
                 \r  -C, --client-id      <str>  The client authorization id .\n\
                 \r  -S, --client-secret  <str>  The client authorization secret .\n\
                 \r  -P, --server-port    <u16>  The address for the webhook to listen to.\n\
-                \r                              (Default: localhost:8080)\n\
+                \r                              (Default: 8080)\n\
                 \r  -d, --sub-data       <path> The location where the subscription list is saved.\n\
                 \r                              The contents should follow a specific json format;\n\
                 \r                              See below for more information.\n\
-                \r                              (Default: subscriptions.json)\n\
+                \r                              (Default: \"subscriptions.json\")\n\
                 \r  -f, --file-name      <str>  Formats the output file name.\n\
                 \r                              See below for more information.\n\
-                \r                              (Default: %Sl\\[%si] %st.ts)
+                \r                              (Default: \"%Sl\\[%si] %st.ts\")
+                \r  --twitch-auth-header <str>  Authentication header to pass to streamlink for\n\
+                \r                              acquiring stream access tokens.\n\
+                \r                              (Default: \"\")\n\
                 \r  --version                   Prints the program version.\n\
                 \r  -h, --help                  Prints this help message.\n\
                 \n\
@@ -100,6 +103,7 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
     let mut csec = None;
     let mut port = 8080;
     let mut fname = "%Sl\\[%si] %st.ts".to_owned();
+    let mut twautheadr = "".to_owned();
     let mut subs = fs::read("subscriptions.json").ok();
 
     while let Some(x) = argv.next() {
@@ -114,9 +118,10 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
                 subs = Some(fs::read(&path).expect(&format!("failed to read file {:?}", &path)));
             },
             "-f" | "--file-name" => fname = argv.next().expect(&err("str", &x)),
+            "--twitch-auth-header" => twautheadr = argv.next().expect(&err("str", &x)),
             "--version" => {
-                println!("
-                twitch-archive v0.2.0\n\
+                println!("\
+                twitch-archive v0.3.0-beta\n\
                 Author: riveroon (github.com/riveroon)");
                 std::process::exit(0);
             }
@@ -150,6 +155,7 @@ pub fn parse_args() -> (String, String, u16, Formatter, Vec<(UserCredentials, Ch
         csec.unwrap(),
         port,
         Formatter::new(&fname),
+        if twautheadr.is_empty() { None } else { Some(twautheadr.into()) },
         channels.into_iter()
             .map(|c| (c.user, c.channel.unwrap_or_default()))
             .collect()

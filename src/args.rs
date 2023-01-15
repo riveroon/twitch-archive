@@ -23,7 +23,7 @@ pub enum UserCredentials {
     Login { login: String },
 }
 
-pub fn parse_args() -> (String, String, u16, Formatter, Option<Box<str>>, Vec<(UserCredentials, ChannelSettings)>) {
+pub fn parse_args() -> (String, String, u16, Option<Box<str>>, Formatter, bool, Option<Box<str>>, Vec<(UserCredentials, ChannelSettings)>) {
     let mut argv = env::args();
     let name = argv.next().unwrap();
     let print_help = || println!("\
@@ -34,13 +34,18 @@ pub fn parse_args() -> (String, String, u16, Formatter, Option<Box<str>>, Vec<(U
                 \r  -S, --client-secret  <str>  The client authorization secret .\n\
                 \r  -P, --server-port    <u16>  The address for the webhook to listen to.\n\
                 \r                              (Default: 8080)\n\
+                \r  -A, --server-host    <str>  The host address the server will receive requests to.\n\
+                \r                              When set, a ngrok tunnel will not be set up automatically.\n\
+                \r                              (Default: None)
                 \r  -d, --sub-data       <path> The location where the subscription list is saved.\n\
                 \r                              The contents should follow a specific json format;\n\
                 \r                              See below for more information.\n\
                 \r                              (Default: \"subscriptions.json\")\n\
                 \r  -f, --file-name      <str>  Formats the output file name.\n\
                 \r                              See below for more information.\n\
-                \r                              (Default: \"%Sl\\[%si] %st.ts\")
+                \r                              (Default: \"%Sl\\[%si] %st\")\n\
+                \r  --save-to-dir               Whether to save the outputs to a directory.\n\
+                \r                              If not set, downloads will be archived to a .tar file.\n\
                 \r  --twitch-auth-header <str>  Authentication header to pass to streamlink for\n\
                 \r                              acquiring stream access tokens.\n\
                 \r                              (Default: \"\")\n\
@@ -102,7 +107,9 @@ pub fn parse_args() -> (String, String, u16, Formatter, Option<Box<str>>, Vec<(U
     let mut cid = None;
     let mut csec = None;
     let mut port = 8080;
+    let mut addr = None;
     let mut fname = "%Sl\\[%si] %st.ts".to_owned();
+    let mut save_dir = false;
     let mut twautheadr = "".to_owned();
     let mut subs = fs::read("subscriptions.json").ok();
 
@@ -113,15 +120,18 @@ pub fn parse_args() -> (String, String, u16, Formatter, Option<Box<str>>, Vec<(U
             "-P" | "--server-port" => port = argv.next()
                 .and_then(|x| x.parse().ok())
                 .expect(&err("u16", &x)),
+            "-A" | "--server-addr" => addr = Some(argv.next().expect(&err("str", &x))),
             "-d" | "--sub-data" => {
                 let path = argv.next().expect(&err("path", &x));
                 subs = Some(fs::read(&path).expect(&format!("failed to read file {:?}", &path)));
             },
             "-f" | "--file-name" => fname = argv.next().expect(&err("str", &x)),
+            "--save-to-dir" => save_dir = true,
             "--twitch-auth-header" => twautheadr = argv.next().expect(&err("str", &x)),
             "--version" => {
                 println!("\
-                twitch-archive v0.3.0-beta\n\
+                twitch-archive\n\
+                version 0.6.0-beta (build 19)\n\
                 Author: riveroon (github.com/riveroon)");
                 std::process::exit(0);
             }
@@ -154,7 +164,9 @@ pub fn parse_args() -> (String, String, u16, Formatter, Option<Box<str>>, Vec<(U
         cid.unwrap(),
         csec.unwrap(),
         port,
+        addr.map(|x| x.into()),
         Formatter::new(&fname),
+        save_dir,
         if twautheadr.is_empty() { None } else { Some(twautheadr.into()) },
         channels.into_iter()
             .map(|c| (c.user, c.channel.unwrap_or_default()))

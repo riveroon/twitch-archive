@@ -21,7 +21,7 @@ enum Elements {
 }
 
 pub struct Formatter {
-    inner: Box<[Elements]>
+    inner: Box<[Elements]>,
 }
 
 impl Formatter {
@@ -34,21 +34,21 @@ impl Formatter {
         }
 
         let mut vec = Vec::new();
-    
+
         let mut skip = true;
         for s in fmt.split('%') {
             if skip {
-                vec.push( Elements::String(s.into()) );
+                vec.push(Elements::String(s.into()));
                 skip = false;
                 continue;
             }
-    
+
             if s.is_empty() {
-                vec.push( Elements::Escape );
+                vec.push(Elements::Escape);
                 skip = true;
                 continue;
             }
-    
+
             let next = match &s[..2] {
                 "Si" => Elements::UserId,
                 "Sl" => Elements::UserLogin,
@@ -65,17 +65,19 @@ impl Formatter {
                 x => {
                     eprintln!("ERROR: filename contains unknown symbol {:?}", x);
                     std::process::exit(-1);
-                },
+                }
             };
             vec.push(next);
             skip = false;
 
-            vec.push(Elements::String( (&s[2..]).into() ));
+            vec.push(Elements::String((&s[2..]).into()));
         }
-        return Self { inner: vec.into_boxed_slice() };
+        Self {
+            inner: vec.into_boxed_slice(),
+        }
     }
 
-    pub fn format<'a> (&self, stream: &Stream) -> String {
+    pub fn format(&self, stream: &Stream) -> String {
         fn san(value: &str) -> String {
             sanitize_filename::sanitize_with_options(
                 value,
@@ -83,7 +85,7 @@ impl Formatter {
                     truncate: false,
                     replacement: "_",
                     ..Options::default()
-                }
+                },
             )
         }
 
@@ -93,59 +95,59 @@ impl Formatter {
             let tmp;
             let next = match e {
                 Elements::UserId => {
-                    tmp = san( stream.user().id() );
+                    tmp = san(stream.user().id());
                     tmp.as_str()
-                },
+                }
                 Elements::UserLogin => {
-                    tmp = san( stream.user().login() );
+                    tmp = san(stream.user().login());
                     tmp.as_str()
-                },
+                }
                 Elements::UserName => {
-                    tmp = san( stream.user().name() );
+                    tmp = san(stream.user().name());
                     tmp.as_str()
-                },
+                }
                 Elements::Year4 => {
                     tmp = stream.started_at().date_naive().year().to_string();
                     tmp.as_str()
-                },
+                }
                 Elements::Year2 => {
                     tmp = (stream.started_at().date_naive().year() % 100).to_string();
                     tmp.as_str()
-                },
+                }
                 Elements::Month => {
                     tmp = stream.started_at().date_naive().month().to_string();
                     tmp.as_str()
-                },
+                }
                 Elements::Day => {
                     tmp = stream.started_at().date_naive().day().to_string();
                     tmp.as_str()
-                },
+                }
                 Elements::Hour => {
                     tmp = stream.started_at().time().hour().to_string();
                     tmp.as_str()
-                },
+                }
                 Elements::Minute => {
                     tmp = stream.started_at().time().minute().to_string();
                     tmp.as_str()
-                },
+                }
                 Elements::Timezone => {
                     tmp = stream.started_at().offset().to_string();
                     tmp.as_str()
-                },
+                }
                 Elements::StreamId => {
-                    tmp = san( stream.id() );
+                    tmp = san(stream.id());
                     tmp.as_str()
-                },
+                }
                 Elements::StreamTitle => {
-                    tmp = san( stream.title() );
+                    tmp = san(stream.title());
                     tmp.as_str()
-                },
+                }
                 Elements::Escape => "%",
-                Elements::String(x) => &*x,
+                Elements::String(x) => x,
             };
             name.push_str(next);
         }
-        
-        return name;
+
+        name
     }
 }

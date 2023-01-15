@@ -1,9 +1,9 @@
-use std::{marker::PhantomData, sync::Arc};
+use super::SubscriptionType;
 use async_std::channel::Receiver;
 use atomic::{Atomic, Ordering};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use super::SubscriptionType;
+use std::{marker::PhantomData, sync::Arc};
 
 #[derive(Clone, PartialEq, Eq, Hash, Deserialize)]
 pub struct SubUnique {
@@ -11,7 +11,9 @@ pub struct SubUnique {
 }
 
 impl SubUnique {
-    pub fn id(&self) -> &str { &self.id }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 #[derive(Deserialize)]
@@ -28,19 +30,28 @@ impl SubInner {
         id: Box<str>,
         status: SubStatus,
         condition: Box<RawValue>,
-        created_at: Box<str>
+        created_at: Box<str>,
     ) -> Self {
         Self {
             unique: SubUnique { id },
-            status: Arc::new(Atomic::new( status )),
-            condition, created_at
+            status: Arc::new(Atomic::new(status)),
+            condition,
+            created_at,
         }
     }
 
-    pub fn id(&self) -> &str { &self.unique.id() }
-    pub fn status(&self) -> SubStatus { self.status.load(Ordering::Relaxed) }
-    pub(crate) fn _status(&self) -> Arc<Atomic<SubStatus>> { self.status.clone() }
-    pub fn get_unique(&self) -> SubUnique { self.unique.clone() }
+    pub fn id(&self) -> &str {
+        self.unique.id()
+    }
+    pub fn status(&self) -> SubStatus {
+        self.status.load(Ordering::Relaxed)
+    }
+    pub(crate) fn _status(&self) -> Arc<Atomic<SubStatus>> {
+        self.status.clone()
+    }
+    pub fn get_unique(&self) -> SubUnique {
+        self.unique.clone()
+    }
 }
 
 #[derive(Deserialize)]
@@ -48,7 +59,7 @@ struct SubInnerDes {
     id: Box<str>,
     status: SubStatus,
     condition: Box<RawValue>,
-    created_at: Box<str>
+    created_at: Box<str>,
 }
 
 impl From<SubInnerDes> for SubInner {
@@ -56,7 +67,6 @@ impl From<SubInnerDes> for SubInner {
         Self::new(value.id, value.status, value.condition, value.created_at)
     }
 }
-
 
 pub struct Subscription<T> {
     inner: SubInner,
@@ -66,10 +76,18 @@ pub struct Subscription<T> {
 }
 
 impl<T> Subscription<T> {
-    pub fn get_unique(&self) -> SubUnique { self.inner.get_unique() }
-    pub fn id(&self) -> &str { self.inner.id() }
-    pub fn status(&self) -> SubStatus { self.inner.status() }
-    pub(crate) fn _status(&self) -> Arc<Atomic<SubStatus>> { self.inner._status() }
+    pub fn get_unique(&self) -> SubUnique {
+        self.inner.get_unique()
+    }
+    pub fn id(&self) -> &str {
+        self.inner.id()
+    }
+    pub fn status(&self) -> SubStatus {
+        self.inner.status()
+    }
+    pub(crate) fn _status(&self) -> Arc<Atomic<SubStatus>> {
+        self.inner._status()
+    }
 }
 
 impl<T: SubscriptionType> Subscription<T> {
@@ -83,21 +101,23 @@ impl<T: SubscriptionType> Subscription<T> {
     ) -> Self {
         Self {
             inner: SubInner::new(id, status, condition, created_at),
-            secret, rx,
+            secret,
+            rx,
             phantom: PhantomData,
         }
     }
 
     pub async fn recv(&self) -> Result<Option<T::Event>, RecvError> {
-        if !self.status().is_ok() { return Ok(None); }
+        if !self.status().is_ok() {
+            return Ok(None);
+        }
 
-        let event = self.rx.recv().await
-            .map_err(|e| RecvError::ChannelClosed(e))?;
-        
-        return match serde_json::from_str(event.get()) {
+        let event = self.rx.recv().await.map_err(RecvError::ChannelClosed)?;
+
+        match serde_json::from_str(event.get()) {
             Ok(x) => Ok(Some(x)),
             Err(e) => Err(RecvError::ParseError(e)),
-        };
+        }
     }
 }
 
@@ -110,10 +130,8 @@ pub enum RecvError {
 impl std::fmt::Display for RecvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChannelClosed(e) => write!(f,
-                "subscription failed to receive event: {}", e),
-            Self::ParseError(e) => write!(f,
-                "subscription failed to parse event: {}", e),
+            Self::ChannelClosed(e) => write!(f, "subscription failed to receive event: {}", e),
+            Self::ParseError(e) => write!(f, "subscription failed to parse event: {}", e),
         }
     }
 }
@@ -136,5 +154,7 @@ pub enum SubStatus {
 }
 
 impl SubStatus {
-    pub fn is_ok(&self) -> bool { *self == Self::Enabled || *self == Self::VerificationPending }
+    pub fn is_ok(&self) -> bool {
+        *self == Self::Enabled || *self == Self::VerificationPending
+    }
 }

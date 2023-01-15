@@ -2235,7 +2235,6 @@ dependencies = [
  "tide",
  "twitchchat",
  "url",
- "winapi",
 ]
 
 [[package]]

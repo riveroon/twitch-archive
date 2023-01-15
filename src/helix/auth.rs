@@ -1,11 +1,14 @@
-use std::{sync::Arc, time::{Instant, Duration}};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_std::sync::Mutex;
 use futures::Future;
 use serde::Deserialize;
-use surf::{http::mime};
+use surf::http::mime;
 
-const AUTH_API: &'static str = "https://id.twitch.tv/oauth2/token";
+const AUTH_API: &str = "https://id.twitch.tv/oauth2/token";
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct Inner {
@@ -28,29 +31,39 @@ impl Inner {
                 &client_secret={}\
                 &grant_type={}",
                 client_id, secret, "client_credentials"
-            )).content_type(mime::FORM)
-            .recv_json().await?;
-        
+            ))
+            .content_type(mime::FORM)
+            .recv_json()
+            .await?;
+
         log::debug!("retrieved auth: expires in {}", res.expires_in);
 
-        return Ok((
+        Ok((
             format!("Bearer {}", &res.access_token).into_boxed_str(),
-            Instant::now() + Duration::from_secs(res.expires_in)))
+            Instant::now() + Duration::from_secs(res.expires_in),
+        ))
     }
 
     async fn get(client_id: String, secret: &str) -> surf::Result<Self> {
-        let (auth, expires) = Self::_get(&client_id, &secret).await?;
+        let (auth, expires) = Self::_get(&client_id, secret).await?;
 
-        Ok( Self { auth, client_id: client_id.into_boxed_str(), expires } )
+        Ok(Self {
+            auth,
+            client_id: client_id.into_boxed_str(),
+            expires,
+        })
     }
 
     fn has_expired(&self) -> bool {
-        return Instant::now().saturating_duration_since(self.expires).as_secs() > 0;
+        Instant::now()
+            .saturating_duration_since(self.expires)
+            .as_secs()
+            > 0
     }
 
     async fn refresh(&mut self, secret: &str) -> surf::Result<()> {
         (self.auth, self.expires) = Self::_get(&self.client_id, secret).await?;
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -61,47 +74,56 @@ pub struct HelixAuth {
 
 impl HelixAuth {
     pub async fn new(client_id: String, secret: String) -> surf::Result<Self> {
-        return Inner::get(client_id, &secret).await.map(|x| 
-            Self{ 
-                inner: Arc::new(Mutex::new(
-                    (x.clone(), secret.into_boxed_str())
-                )),
-            }
-        );
+        Inner::get(client_id, &secret).await.map(|x| Self {
+            inner: Arc::new(Mutex::new((x, secret.into_boxed_str()))),
+        })
     }
 
-    async fn has_expired(&self) -> bool { (&*self.inner.lock().await).0.has_expired() }
+    async fn has_expired(&self) -> bool {
+        (*self.inner.lock().await).0.has_expired()
+    }
 
     pub async fn refresh(&mut self) -> surf::Result<()> {
         let (inner, secret) = &mut *self.inner.lock().await;
         inner.refresh(secret).await?;
-        return Ok(());
+        Ok(())
     }
 
-    pub async fn auth(&self) -> String { (&*self.inner.lock().await).0.auth.clone().into() }
-    pub async fn with_auth<F, T, Fut> (&self, mut f: F) -> T
+    pub async fn auth(&self) -> String {
+        (*self.inner.lock().await).0.auth.clone().into()
+    }
+    pub async fn with_auth<F, T, Fut>(&self, mut f: F) -> T
     where
         F: FnMut(&str) -> Fut,
-        Fut: Future<Output = T>
+        Fut: Future<Output = T>,
     {
-        let auth = &*(&*self.inner.lock().await).0.auth;
+        let auth = &*(*self.inner.lock().await).0.auth;
         f(auth).await
     }
 
-    pub async fn client_id(&self) -> String { (&*self.inner.lock().await).0.client_id.clone().into() }
-    pub async fn with_client_id<F, T, Fut> (&self, mut f: F) -> T
+    pub async fn client_id(&self) -> String {
+        (*self.inner.lock().await).0.client_id.clone().into()
+    }
+    pub async fn with_client_id<F, T, Fut>(&self, mut f: F) -> T
     where
         F: FnMut(&str) -> Fut,
-        Fut: Future<Output = T>
+        Fut: Future<Output = T>,
     {
-        let client_id = &*(&*self.inner.lock().await).0.client_id;
+        let client_id = &*(*self.inner.lock().await).0.client_id;
         f(client_id).await
     }
 
-    pub async fn send (&self, mut req: surf::Request) -> surf::Result<surf::Response> {
-        async fn _send(auth: &HelixAuth, mut req: surf::Request, refresh: bool) -> surf::Result<surf::Response> {
-            let lock = &mut *auth.inner.lock().await;
-            if refresh { lock.0.refresh(&*lock.1).await?; }
+    pub async fn send(&self, req: surf::Request) -> surf::Result<surf::Response> {
+        async fn _send(
+            auth: &HelixAuth,
+            mut req: surf::Request,
+            refresh: bool,
+        ) -> surf::Result<surf::Response> {
+            let mut lock = auth.inner.lock().await;
+            let (inner, secret) = &mut *lock;
+            if refresh {
+                inner.refresh(secret).await?;
+            }
             req.insert_header("Authorization", &*lock.0.auth);
             req.insert_header("Client-Id", &*lock.0.client_id);
             drop(lock);
@@ -111,11 +133,13 @@ impl HelixAuth {
 
         use surf::StatusCode;
         let b = req.clone();
-        let mut res = _send(self, req, false).await?;
-        
-        if res.status() != StatusCode::Unauthorized { return Ok(res) };
+        let res = _send(self, req, false).await?;
+
+        if res.status() != StatusCode::Unauthorized {
+            return Ok(res);
+        };
 
         log::info!("received status code 401; refreshing auth");
-        return _send(self, b, true).await;
+        _send(self, b, true).await
     }
 }

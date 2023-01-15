@@ -26,4 +26,3 @@ chrono = "0.4"
 twitchchat = { version = "0.14", features = ["async", "async-std", "async-tls"] }
 rand = "0.8"
 async-tar = "0.4"
-winapi = "0.3"

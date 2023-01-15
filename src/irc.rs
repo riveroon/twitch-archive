@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{atomic::AtomicBool, Arc}};
 use twitchchat::AsyncRunner;
 use async_std::channel::{Sender, Receiver};
 
-const CHANNEL_BOUND: usize = 4;
+const CHANNEL_BOUND: usize = 16;
 
 pub struct IrcClientBuilder {
     map: HashMap<Box<str>, (Sender<Box<str>>, Arc<AtomicBool>)>

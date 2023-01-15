@@ -1,12 +1,11 @@
 use super::HelixAuth;
 use async_once_cell::OnceCell;
-use serde::Deserialize;
-use surf::{RequestBuilder, http};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 const USER_API: &'static str = "https://api.twitch.tv/helix/users";
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserType {
     Admin,
@@ -16,7 +15,7 @@ pub enum UserType {
     None
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BroadcasterType {
     Affiliate,
@@ -25,7 +24,7 @@ pub enum BroadcasterType {
     None
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Details {
     #[serde(rename = "type")]
     user_type: UserType,
@@ -56,14 +55,16 @@ where
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct Credentials {
     id: Box<str>,
     login: Box<str>,
-    #[serde(rename = "display_name")]
+    #[serde(rename(deserialize = "display_name"))]
     name: Box<str>,
 }
 
+#[derive(Serialize, Debug)]
+#[serde(into = "UserSer")]
 pub struct User {
     credentials: Credentials,
     details: OnceCell<Box<Details>>,
@@ -134,6 +135,23 @@ use core::{hash::{Hash, Hasher}, fmt};
 impl Hash for User {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.credentials.hash(state);
+    }
+}
+
+#[derive(Serialize)]
+struct UserSer {
+    #[serde(flatten)]
+    credentials: Credentials,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    details: Option<Details>
+}
+
+impl From<User> for UserSer {
+    fn from(value: User) -> Self {
+        Self {
+            credentials: value.credentials,
+            details: value.details.into_inner().map(|x| *x)
+        }
     }
 }
 

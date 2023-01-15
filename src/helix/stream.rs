@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 
 const STREAM_API: &'static str = "https://api.twitch.tv/helix/streams";
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "StreamDes")]
 pub struct Stream {
     id: Box<str>,
@@ -23,7 +23,7 @@ impl Stream {
     pub fn game_id(&self) -> &str { &self.game_id }
     pub fn game_name(&self) -> &str { &self.game_name }
     pub fn title(&self) -> &str { &self.title }
-    pub fn started_at (&self) -> DateTime<Local> { self.started_at}
+    pub fn started_at (&self) -> DateTime<Local> { self.started_at }
 }
 
 #[derive(Deserialize)]
@@ -75,7 +75,7 @@ where
     use surf::{http, StatusCode, RequestBuilder};
 
 
-    #[derive(Deserialize)]
+    #[derive(Debug, Deserialize)]
     struct Pagination { cursor: Option<Box<str>> }
 
     #[derive(Deserialize)]
@@ -103,16 +103,19 @@ where
         |(state, auth)| async {
             let (mut data, page) = match state {
                 State::Init(url) => {
+                    log::trace!("fetching streams: {:?}", url.as_str());
                     let res: GetStreamsRes = auth.send(
                         RequestBuilder::new(http::Method::Get, *url).build()
                     ).await?.body_json().await?;
+                    log::trace!("fetch successful: {:?}, {:?}", res.data, res.pagination);
                     (res.data.into_iter(), res.pagination)
                 },
                 State::Next(data, page) => (data, page)
             };
 
             if let Some(x) = data.next() { return Ok(Some( (x, (State::Next(data, page), auth)) )) }
-            
+            log::trace!("no data: fetching next page");
+
             let Some(cursor) = page.cursor else { return Ok(None) };
 
             #[derive(Serialize)]

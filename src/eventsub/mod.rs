@@ -131,7 +131,7 @@ async fn callback(mut req: Request<State>) -> tide::Result {
             let challenge: ChallengeReq = serde_json::from_slice(&body)?;
             
             let map = &*req.state().lock().await;
-            let (status, secret, tx) =
+            let (status, secret, _) =
                 if let Some(x) = map.get(&challenge.subscription) {x}
                 else { return Ok(Response::builder(404).build()) };
             
@@ -160,13 +160,13 @@ async fn callback(mut req: Request<State>) -> tide::Result {
             
             let rev: RevokeReq = serde_json::from_slice(&body)?;
 
-            let (status, secret, tx) =
+            let (status, secret, _) =
                 if let Some(x) = (*req.state().lock().await).remove(&rev.subscription.unique) {x}
                 else { return Ok(Response::builder(404).build()) };
             
             if !verify_msg(&secret, &req, &body) { return Ok(Response::builder(401).build()); }
             
-            let s = status.swap(rev.subscription.status, Ordering::Relaxed);
+            status.swap(rev.subscription.status, Ordering::Relaxed);
             return Ok(Response::builder(200).build());
         }
         _ => return Ok(Response::builder(400).build()),

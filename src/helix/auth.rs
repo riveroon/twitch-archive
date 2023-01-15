@@ -105,6 +105,7 @@ impl HelixAuth {
             req.insert_header("Authorization", &*lock.0.auth);
             req.insert_header("Client-Id", &*lock.0.client_id);
             drop(lock);
+            log::trace!("sending request: {:?}", req);
             return surf::client().send(req).await;
         }
 

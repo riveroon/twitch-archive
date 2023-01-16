@@ -6,8 +6,7 @@ use serde::Deserialize;
 use crate::filename::Formatter;
 
 static NAME: OnceCell<Box<str>> = OnceCell::new();
-const VERSION: &str = "0.6.2-beta";
-const BUILD: usize = 25;
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Argv {
     pub client_id: String,
@@ -52,14 +51,10 @@ pub enum UserCredentials {
 fn info() -> String {
     format!(
         "twitch-archive\n\
-        version {} (build {})\n\
+        version {}\n\
         Author: riveroon (github.com/riveroon)",
-        VERSION, BUILD
+        VERSION
     )
-}
-
-fn version() -> String {
-    format!("{}+build.{}", VERSION, BUILD)
 }
 
 fn help() -> String {
@@ -221,7 +216,7 @@ pub fn parse_args() -> Argv {
                 }
             }
             "--version" => {
-                println!("{}", version());
+                println!("{}", VERSION);
                 std::process::exit(0);
             }
             "-h" | "--help" => {

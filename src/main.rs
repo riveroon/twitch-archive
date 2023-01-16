@@ -288,7 +288,19 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
 
     async fn move_dir(orig: &path::Path, dest: &path::Path) -> io::Result<Box<path::Path>> {
         let dir = fs_utils::create_dedup_dir(dest).await?;
-        fs::rename(orig, &dir).await?;
+        // see async-std issue#1053
+        fs::read_dir(&orig)
+            .await?
+            .map(|entry| async move {
+                let entry = entry?;
+                fs::rename(entry.path(), dest.join(entry.path().file_name().unwrap())).await
+            })
+            .buffer_unordered(ASYNC_BUF_FACTOR)
+            .try_collect()
+            .await?;
+
+        fs::remove_dir_all(orig).await?;
+
         Ok(dir)
     }
 
@@ -299,11 +311,8 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
         let mut dir_entry = fs::read_dir(&path)
             .await?
             .map(|entry| async move {
-                let entry = match entry {
-                    Ok(x) => x,
-                    Err(e) => return Err(e),
-                };
-                return Ok((entry.path().is_dir().await, entry));
+                let entry = entry?;
+                return io::Result::Ok((entry.path().is_dir().await, entry));
             })
             .buffer_unordered(ASYNC_BUF_FACTOR);
 

@@ -6,8 +6,8 @@ use serde::Deserialize;
 use crate::filename::Formatter;
 
 static NAME: OnceCell<Box<str>> = OnceCell::new();
-const VERSION: &str = "0.6.1-beta";
-const BUILD: usize = 23;
+const VERSION: &str = "0.6.2-beta";
+const BUILD: usize = 25;
 
 pub struct Argv {
     pub client_id: String,

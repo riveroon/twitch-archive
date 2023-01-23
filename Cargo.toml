@@ -1,6 +1,6 @@
 [package]
 name = "twitch-archive"
-version = "0.6.2-beta+build.26"
+version = "0.7.0-beta+build.34"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -26,3 +26,5 @@ chrono = "0.4"
 twitchchat = { version = "0.14", features = ["async", "async-std", "async-tls"] }
 rand = "0.8"
 async-tar = "0.4"
+m3u8-rs = { path = "../m3u8-rs" }
+nom = "7.1"

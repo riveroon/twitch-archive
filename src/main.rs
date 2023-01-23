@@ -13,6 +13,7 @@ use irc::IrcRecv;
 mod filename;
 mod fs_utils;
 mod rand;
+mod hls;
 
 use async_std::{
     fs,
@@ -195,9 +196,6 @@ async fn cmd(program: &str, args: &[&str], output: bool) -> Result<Option<String
 
 async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Result<(), ()> {
     async fn _stream(path: path::PathBuf, stream: &Stream, format: &str) -> Result<(), ()> {
-        let filepath = path.join("stream.ts").to_str().unwrap().to_owned();
-        let logpath = path.join("output.log").to_str().unwrap().to_owned();
-
         log::debug!(
             "download location for stream {}: {}",
             stream.id(),
@@ -206,15 +204,8 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
 
         let link = format!("https://twitch.tv/{}", stream.user().login());
         let mut args = vec![
-            "--twitch-disable-hosting",
-            "--twitch-disable-ads",
-            "--logfile",
-            &logpath,
-            "-f",
-            "-o",
-            &filepath,
+            "--stream-url",
             &link,
-            format,
         ];
 
         if let Some(x) = TW_STREAM_AUTH.get() {
@@ -222,33 +213,12 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
             args.insert(1, x);
         }
 
-        if cmd("streamlink", &args, false).await.is_ok() {
-            return Ok(());
-        }
+        let Ok(Some(url)) = cmd("streamlink", &args, true).await else {
+            log::error!("failed to fetch hls playlist for stream #{}", stream.id());
+            return Err(());
+        };
 
-        log::warn!("streamlink download failed; falling back to youtube-dl!");
-
-        let filepath = path.join("stream-1.ts").to_str().unwrap().to_owned();
-
-        for f in format.split(',') {
-            let mut args = vec!["-o", &filepath, &link];
-
-            if !f.is_empty() {
-                args.insert(0, "-f");
-                args.insert(1, f);
-            }
-
-            if cmd("youtube-dl", &args, false).await.is_ok() {
-                return Ok(());
-            };
-        }
-
-        log::error!(
-            "could not download stream {} for channel {}",
-            stream.id(),
-            stream.user()
-        );
-        Err(())
+        hls::download(url, &path, format.split(',').map(|x| x.trim())).await
     }
 
     async fn _chat(

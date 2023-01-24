@@ -289,8 +289,10 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
         while let Some(x) = dir_entry.next().await {
             let (is_dir, entry) = x?;
             if is_dir {
-                tar.append_dir_all(&entry.path(), entry.file_name()).await?;
+                log::trace!("appending directory {}: {}", entry.path().to_string_lossy(), entry.file_name().to_string_lossy());
+                tar.append_dir_all(entry.file_name(), &entry.path()).await?;
             } else {
+                log::trace!("appending file {}: {}", entry.path().to_string_lossy(), entry.file_name().to_string_lossy());
                 tar.append_path_with_name(&entry.path(), entry.file_name())
                     .await?;
             };
@@ -372,7 +374,7 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
             })
             .map_err(|e| {
                 log::error!(
-                    "could not make tar {:?} from contents of directory {:?}: {}",
+                    "could not make tar {:?} from contents of directory {:?}: {:?}",
                     path.to_string_lossy(),
                     dl_path.to_string_lossy(),
                     e

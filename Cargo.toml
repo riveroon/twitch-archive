@@ -1,6 +1,6 @@
 [package]
 name = "twitch-archive"
-version = "0.7.0-beta+build.39"
+version = "0.7.0-beta+build.41"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

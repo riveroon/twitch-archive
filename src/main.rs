@@ -69,7 +69,7 @@ async fn datafile(path: &path::Path, stream: &Stream) -> io::Result<()> {
             if entry
                 .file_name()
                 .to_str()
-                .map(|x| x.starts_with("stream") && x.ends_with(".ts"))
+                .map(|x| x.ends_with(".m3u8"))
                 .unwrap_or(false)
             {
                 let time: DateTime<Local> = fs::metadata(&entry.path()).await?.created()?.into();

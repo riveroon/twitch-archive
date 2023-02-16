@@ -1,7 +1,7 @@
-use super::{HelixAuth, User};
-
 use chrono::{DateTime, Local};
-use serde::{Deserialize, Serialize};
+
+use super::{HelixAuth, User};
+use crate::prelude::*;
 
 const STREAM_API: &str = "https://api.twitch.tv/helix/streams";
 
@@ -78,7 +78,7 @@ use futures::TryStream;
 pub fn get_streams<'a, T>(
     auth: HelixAuth,
     filter: T,
-) -> impl TryStream<Ok = Stream, Error = surf::Error> + Unpin
+) -> impl TryStream<Ok = Stream, Error = anyhow::Error> + Unpin
 where
     T: IntoIterator<Item = StreamFilter<'a>>,
 {
@@ -116,11 +116,9 @@ where
         |(state, auth)| async {
             let (mut data, page) = match state {
                 State::Init(url) => {
-                    log::trace!("fetching streams: {:?}", url.as_str());
+                    log::trace!("fetching streams: {url}");
                     let res: GetStreamsRes = auth
-                        .send(RequestBuilder::new(http::Method::Get, *url).build())
-                        .await?
-                        .body_json()
+                        .send_req_json(RequestBuilder::new(http::Method::Get, *url).build())
                         .await?;
                     log::trace!("fetch successful: {:?}, {:?}", res.data, res.pagination);
                     (res.data.into_iter(), res.pagination)
@@ -131,9 +129,12 @@ where
             if let Some(x) = data.next() {
                 return Ok(Some((x, (State::Next(data, page), auth))));
             }
-            log::trace!("no data: fetching next page");
+            log::trace!("no data; fetching next page");
 
             let Some(cursor) = page.cursor else { return Ok(None) };
+            if cursor.is_empty() {
+                return Ok(None);
+            };
 
             #[derive(Serialize)]
             struct Query<'a> {
@@ -141,17 +142,17 @@ where
                 after: &'a str,
             }
 
+            log::trace!("fetching streams (next page)");
             let res: GetStreamsRes = auth
-                .send(
+                .send_req_json(
                     surf::get(STREAM_API)
                         .query(&Query {
                             first: 100,
                             after: &cursor,
-                        })?
+                        })
+                        .map_err(|e| e.into_inner())?
                         .build(),
                 )
-                .await?
-                .body_json()
                 .await?;
 
             let (mut data, page) = (res.data.into_iter(), res.pagination);

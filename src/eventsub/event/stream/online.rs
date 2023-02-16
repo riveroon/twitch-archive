@@ -1,6 +1,12 @@
-use super::super::SubscriptionType;
 use chrono::{DateTime, Local};
-use serde::{Deserialize, Serialize};
+use futures::TryStreamExt;
+
+use super::super::SubscriptionType;
+use crate::{
+    helix::{get_streams, Stream, StreamFilter, User},
+    prelude::*,
+    HelixAuth,
+};
 
 pub struct Online;
 
@@ -44,11 +50,6 @@ pub struct OnlineEvent {
     started_at: DateTime<Local>,
 }
 
-use crate::{
-    helix::{get_streams, Stream, StreamFilter, User},
-    HelixAuth,
-};
-use futures::TryStreamExt;
 impl OnlineEvent {
     pub fn id(&self) -> &str {
         &self.id
@@ -60,7 +61,7 @@ impl OnlineEvent {
         &self.started_at
     }
 
-    pub async fn to_stream(&self, auth: HelixAuth) -> surf::Result<Option<Stream>> {
+    pub async fn to_stream(&self, auth: HelixAuth) -> Result<Option<Stream>> {
         get_streams(auth, std::iter::once(StreamFilter::User(&self.user)))
             .try_next()
             .await

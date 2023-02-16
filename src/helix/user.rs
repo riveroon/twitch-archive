@@ -1,7 +1,9 @@
-use super::HelixAuth;
 use async_once_cell::OnceCell;
-use serde::{Deserialize, Serialize};
+use core::hash::{Hash, Hasher};
 use url::Url;
+
+use super::HelixAuth;
+use crate::prelude::*;
 
 const USER_API: &str = "https://api.twitch.tv/helix/users";
 
@@ -80,11 +82,11 @@ impl User {
         }
     }
 
-    pub async fn from_id(id: &str, auth: &HelixAuth) -> surf::Result<Self> {
+    pub async fn from_id(id: &str, auth: &HelixAuth) -> Result<Self> {
         get_user(auth, UserCredentials::Id(id)).await
     }
 
-    pub async fn from_login(login: &str, auth: &HelixAuth) -> surf::Result<Self> {
+    pub async fn from_login(login: &str, auth: &HelixAuth) -> Result<Self> {
         get_user(auth, UserCredentials::Login(login)).await
     }
 
@@ -101,7 +103,7 @@ impl User {
     /// Fetches the user details from the twitch server.
     /// This creates a local cache of the response, and therefore
     /// returns the details of a user sometime in the past.
-    async fn get_details(&self, auth: &HelixAuth) -> surf::Result<&Details> {
+    async fn get_details(&self, auth: &HelixAuth) -> Result<&Details> {
         self.details
             .get_or_try_init(async {
                 Ok(get_user(auth, UserCredentials::Id(&self.credentials.id))
@@ -138,10 +140,6 @@ impl PartialEq for User {
 
 impl Eq for User {}
 
-use core::{
-    fmt,
-    hash::{Hash, Hasher},
-};
 impl Hash for User {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.credentials.hash(state);
@@ -176,7 +174,7 @@ pub(crate) enum UserCredentials<'a> {
 async fn _get_user(
     auth: &HelixAuth,
     users: &[UserCredentials<'_>],
-) -> surf::Result<impl Iterator<Item = User>> {
+) -> Result<impl Iterator<Item = User>> {
     #[derive(Deserialize)]
     struct GetUserRes {
         data: Vec<UserDes>,
@@ -197,7 +195,7 @@ async fn _get_user(
             UserCredentials::Login(login) => ("login", *login),
         }));
 
-    let res: GetUserRes = auth.send(surf::get(url).build()).await?.body_json().await?;
+    let res: GetUserRes = auth.send_req_json(surf::get(url).build()).await?;
 
     Ok(res.data.into_iter().map(
         |UserDes {
@@ -210,7 +208,7 @@ async fn _get_user(
     ))
 }
 
-pub(crate) async fn get_user(auth: &HelixAuth, cred: UserCredentials<'_>) -> surf::Result<User> {
+pub(crate) async fn get_user(auth: &HelixAuth, cred: UserCredentials<'_>) -> Result<User> {
     Ok(_get_user(auth, &[cred])
         .await?
         .next()

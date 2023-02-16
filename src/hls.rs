@@ -1,45 +1,82 @@
-use std::{mem, time};
-use async_std::{io::{self, BufWriter}, fs, path, task};
+use anyhow::{anyhow, Context};
+use async_std::{
+    fs,
+    io::{self, BufWriter},
+    path, task,
+};
 use futures::AsyncWriteExt;
-use m3u8_rs::AlternativeMediaType;
+use m3u8_rs::{AlternativeMedia, AlternativeMediaType, VariantStream};
+use std::{mem, time};
 
-pub async fn download(uri: impl AsRef<str>, dest: &path::Path, format: impl Iterator<Item = &str>) -> Result<(), ()> {
+use crate::prelude::*;
+
+pub type StreamData = (path::PathBuf, AlternativeMedia, Option<VariantStream>);
+
+pub async fn download(
+    uri: impl AsRef<str>,
+    dest: &path::Path,
+    format: impl Iterator<Item = &str>,
+) -> Result<Option<StreamData>> {
     let client: surf::Client = surf::Config::new()
         .set_timeout(Some(time::Duration::from_secs(15)))
         .try_into()
         .unwrap();
 
-    let res = client.get(uri)
-        .recv_bytes()
-        .await
-        .map_err(|e| log::error!("error while retrieving master playlist: {}", e))?; 
-    
-    let (_, master) = m3u8_rs::parse_master_playlist(&res)
-        .map_err(|e| log::error!("malformed m3u8 hls master playlist: {}", e))?;
+    let master = {
+        let mut res = client.get(uri).send().await.map_err(|e| e.into_inner())?;
 
-    let mut alt = None;
-    for f in format {
-        alt = master.alternatives.iter()
-            .find(|x| x.name == f);
-        if alt.is_some() { break; }
-    }
-    let Some(alt) = alt else { return Ok(()) };
+        if !res.status().is_success() {
+            return Err(anyhow!(
+                "master playlist request returned status {}",
+                res.status()
+            ));
+        }
 
-    let var = master.variants.iter()
-        .find(|x| {
-            match &alt.media_type {
-                AlternativeMediaType::Video => x.video.as_ref() == Some(&alt.group_id),
-                AlternativeMediaType::Audio => x.audio.as_ref() == Some(&alt.group_id),
-                AlternativeMediaType::Subtitles => x.subtitles.as_ref() == Some(&alt.group_id),
-                AlternativeMediaType::ClosedCaptions => false,
-                AlternativeMediaType::Other(_) => false
-            }
-        });
-    
-    let url = if let Some(url) = &alt.uri {url} else {
+        let body = res
+            .body_bytes()
+            .await
+            .map_err(|e| e.into_inner().context("failed to retrieve master playlist"))?;
+
+        let (_, master) = m3u8_rs::parse_master_playlist(&body).map_err(|e| {
+            log::error!("malformed m3u8 hls master playlist: {e:?}");
+            anyhow!("malformed m3u8 hls master playlist")
+        })?;
+
+        master
+    };
+
+    let (format, alt) = {
+        let format: Vec<&str> = format.collect();
+        let Some((format, alt)) = format.iter()
+            .find_map(|&f| {
+                if f == "best" {
+                    master.alternatives.get(0)
+                } else {
+                    master.alternatives.iter()
+                        .find(|x| x.name.starts_with(f))
+                }.map(|x| (f, x))
+            }) else {
+            log::info!("no matching quality found: expected {format:?}, found {:?}", master.alternatives);
+            return Ok(None);
+        };
+
+        (format, alt)
+    };
+
+    let var = master.variants.iter().find(|x| match &alt.media_type {
+        AlternativeMediaType::Video => x.video.as_ref() == Some(&alt.group_id),
+        AlternativeMediaType::Audio => x.audio.as_ref() == Some(&alt.group_id),
+        AlternativeMediaType::Subtitles => x.subtitles.as_ref() == Some(&alt.group_id),
+        AlternativeMediaType::ClosedCaptions => false,
+        AlternativeMediaType::Other(_) => false,
+    });
+
+    let url = if let Some(url) = &alt.uri {
+        url
+    } else {
         let Some(var) = var else {
-            log::error!("could not find matching STREAM-INF for MEDIA tag :{}", dest.to_string_lossy());
-            return Err(());
+            log::error!("could not find matching STREAM-INF for MEDIA tag :{}", dest.display());
+            return Err(anyhow!("url missing for format {}", format));
         };
 
         &var.uri
@@ -47,56 +84,110 @@ pub async fn download(uri: impl AsRef<str>, dest: &path::Path, format: impl Iter
 
     let mut buf = Vec::new();
     let mut pos = 0;
-    
-    let segpath = dest.join(format!("{}.m3u8", &alt.name));
-    let mut segfile = BufWriter::new( fs::File::create(&segpath).await
-        .map_err(|e| log::error!("failed to create segments file {:?}: {}", segpath.to_string_lossy(), e))? );
+
+    let mediapath = dest.join(format!("{}.m3u8", &alt.name));
+    let mut mediafile = BufWriter::new(
+        fs::File::create(&mediapath)
+            .await
+            .context("failed to create segments file")?,
+    );
     let mut init = false;
+    let mut ad_filt = false;
 
     let segdest = dest.join(&alt.name);
-    fs::create_dir_all(&segdest).await
-        .map_err(|e| log::error!("failed to create directory {}: {}", dest.to_string_lossy(), e))?;
+    fs::create_dir_all(&segdest)
+        .await
+        .context("failed to create segment directory")?;
 
     loop {
         let ts = time::Instant::now();
 
-        log::trace!("retrieving hls media playlist: {}", url);
-        let res = client.get(url)
-            .recv_bytes().await
-            .map_err(|e| log::error!("failed to GET media playlist: {}", e))?;
+        let mut media = {
+            log::trace!("retrieving hls media playlist: {url}");
+            let mut res = client.get(url).send().await.map_err(|e| e.into_inner())?;
 
-        let (_, mut media) = m3u8_rs::parse_media_playlist(&res)
-            .map_err(|e| log::error!("malformed m3u8 hls media playlist: {}", e))?;
+            if !res.status().is_success() {
+                return Err(anyhow!(
+                    "media playlist request returned status {}",
+                    res.status()
+                ));
+            }
 
-        let list = mem::take(&mut media.segments);
+            let body = res
+                .body_bytes()
+                .await
+                .map_err(|e| e.into_inner().context("failed to retrieve media playlist"))?;
+
+            let (_, media) = m3u8_rs::parse_media_playlist(&body).map_err(|e| {
+                log::error!("failed to parse m3u8 hls media playlist: {e:?}");
+                anyhow!("failed to parse m3u8 hls media playlist")
+            })?;
+
+            media
+        };
+
+        let mut list = mem::take(&mut media.segments);
+        let len = list.len();
+        log::trace!("retrieved hls media playlist with {len} segments");
 
         if !init {
+            let end_list = media.end_list;
+            media.end_list = false;
+            media.playlist_type = Some(m3u8_rs::MediaPlaylistType::Vod);
             media.write_to(&mut buf).unwrap();
-            segfile.write_all(&buf).await
-                .map_err(|e| log::error!("failed to write to segments file {:?}: {}", segpath.to_string_lossy(), e))?;
+            mediafile
+                .write_all(&buf)
+                .await
+                .context("failed to write media palylist")?;
             buf.clear();
             pos = media.media_sequence;
             init = true;
+            media.end_list = end_list;
         } else if media.media_sequence > pos {
-            log::trace!("creating next segment because {} > {}", media.media_sequence, pos);
-            break;
+            //log::trace!("creating next segment because {} > {}", media.media_sequence, pos);
+            //break;
+            log::warn!("media sequence bigger than expected pos ({} > {pos}); stream may not be continuous!", media.media_sequence);
+            if let Some(x) = list.get_mut(0) {
+                x.discontinuity = true;
+            }
+            pos = media.media_sequence;
         }
 
-        let len = list.len();
-        log::trace!("retrieved hls media playlist with {} segments", len);
+        if !ad_filt {
+            //remove ad segment
+            for (n, s) in list.iter().enumerate() {
+                let idx = media.media_sequence + n as u64;
+                if idx < pos {
+                    log::trace!("skipping segment #{idx} because we need {pos}");
+                    continue;
+                }
+
+                if let Some(x) = &s.title {
+                    if x.starts_with("Amazon") {
+                        log::trace!("skipping ad segment {pos}");
+                        pos += 1;
+                        continue;
+                    }
+                }
+                ad_filt = true;
+                break;
+            }
+        }
 
         for (n, mut e) in list.into_iter().enumerate() {
             let idx = media.media_sequence + n as u64;
             if idx < pos {
-                log::trace!("skipping segment #{} because we need {}", idx, pos);
+                log::trace!("skipping segment #{idx} because we need {pos}");
                 continue;
             }
 
-            log::trace!("downloading media segment #{}: {}", idx, e.uri);
+            log::trace!("downloading media segment #{idx}: {}", e.uri);
 
-            let res = client.get(&e.uri)
-                .send().await
-                .map_err(|e| log::error!("failed to GET media segment: {}", e))?;
+            let res = client
+                .get(&e.uri)
+                .send()
+                .await
+                .map_err(|e| e.into_inner().context("failed to GET media segment"))?;
 
             e.uri = format!("{}/{:04}.ts", &alt.name, idx);
 
@@ -106,30 +197,44 @@ pub async fn download(uri: impl AsRef<str>, dest: &path::Path, format: impl Iter
                 .write(true)
                 .open(&path)
                 .await
-                .map_err(|e| log::error!("failed to create segment file {:?}: {}", path, e))?;
-                
-            io::copy(res, &mut file).await
-                .map_err(|e| log::error!("failed to write media segment to file {:?}: {}", path, e))?;
+                .context("failed to create segment")?;
 
-            file.flush().await
-                .map_err(|e| log::error!("failed to flush contents of file {:?}: {}", path, e))?;
+            io::copy(res, &mut file)
+                .await
+                .context("failed to write segment")?;
+
+            file.flush().await.context("failed to flush segment")?;
 
             e.write_to(&mut buf).unwrap();
-            segfile.write_all(&buf).await
-                .map_err(|e| log::error!("failed to write segment data to segments file {:?}: {}", segpath.to_string_lossy(), e))?;
+            mediafile
+                .write_all(&buf)
+                .await
+                .context("failed to write to media segment")?;
             buf.clear();
         }
 
         pos = media.media_sequence + len as u64;
 
-        if media.end_list { break; }
+        if media.end_list {
+            log::trace!("received ENDLIST; finishing stream");
+            break;
+        }
+
         task::sleep(
-            (ts + time::Duration::from_secs_f32(media.target_duration * 2.0)) - time::Instant::now()
-        ).await;
+            (ts + time::Duration::from_secs_f32(media.target_duration)) - time::Instant::now(),
+        )
+        .await;
     }
 
-    segfile.flush().await
-        .map_err(|e| log::error!("failed to flush contents of file {:?}: {}", segpath.to_string_lossy(), e))?;
+    mediafile
+        .write_all(b"#EXT-X-ENDLIST")
+        .await
+        .context("failed to finish hls playlist")?;
 
-    Ok(())
+    mediafile
+        .flush()
+        .await
+        .context("failed to flush media segment")?;
+
+    Ok(Some((mediapath, alt.to_owned(), var.cloned())))
 }

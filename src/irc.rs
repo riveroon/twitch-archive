@@ -1,12 +1,40 @@
+use async_std::channel;
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicBool, Arc},
 };
-
-use async_std::channel;
 use twitchchat::AsyncRunner;
 
+use crate::prelude::*;
+
 const CHANNEL_BOUND: usize = 16;
+
+macro_rules! try_send {
+    ($map:expr, $msg:expr) => {
+        if let Some(tx) = $map.get($msg.channel()) {
+            if let Err(e) = tx.try_send($msg.raw().into()) {
+                log::warn!(
+                    "failed to send IRC to matching handler {}: {e:?}",
+                    $msg.channel()
+                );
+            }
+        } else {
+            log::warn!(
+                "received IRC message for unknown channel {}",
+                $msg.channel()
+            );
+        }
+    };
+    ($map:expr, $chname:expr, $msg:expr) => {
+        if let Some(tx) = $map.get($chname) {
+            if let Err(e) = tx.try_send($msg.into()) {
+                log::warn!("failed to send IRC to matching handler {}: {e:?}", $chname);
+            }
+        } else {
+            log::warn!("received IRC message for unknown channel {}", $chname);
+        }
+    };
+}
 
 pub struct IrcClientBuilder {
     map: HashMap<Box<str>, IrcSend>,
@@ -35,242 +63,95 @@ impl IrcClientBuilder {
     }
 
     pub fn build(self) {
-        use async_std::task::spawn;
+        use async_std::task;
 
         log::debug!("spawning IRC handler");
-        spawn(async move {
-            use core::time::Duration;
-            use twitchchat::{messages::Commands, Status};
+        task::Builder::new()
+            .name("irc".to_owned())
+            .spawn(async move {
+                use core::time::Duration;
+                use twitchchat::{messages::Commands, Status};
 
-            async fn _connect() -> Result<AsyncRunner, twitchchat::runner::Error> {
-                use twitchchat::{
-                    connector::async_std::ConnectorTls, twitch::Capability, UserConfig,
-                };
-
-                let conn = ConnectorTls::twitch()?;
-                let config = UserConfig::builder()
-                    .anonymous()
-                    .capabilities(&[Capability::Tags])
-                    .build()
-                    .unwrap();
-
-                let runner = AsyncRunner::connect(conn, &config).await?;
-                log::info!("connected to the IRC server");
-                log::trace!("IRC identity: {:?}", runner.identity);
-
-                Ok(runner)
-            }
-
-            async fn _handle(
-                mut runner: AsyncRunner,
-                map: &HashMap<Box<str>, IrcSend>,
-            ) -> Result<(), twitchchat::runner::Error> {
-                loop {
-                    let msg = runner.next_message().await?;
-
-                    // I could probably make a macro for this... but I'm laaaaazy :P
-                    match msg {
-                        x @ (Status::Quit | Status::Eof) => {
-                            log::info!("Received signal {:?}; shuttind down irc!", x);
-                            return Ok(());
-                        }
-                        Status::Message(Commands::Raw(raw)) => {
-                            log::trace!("Recieved raw IRC message: {}", raw.get_raw());
-                            continue;
-                        }
-                        Status::Message(Commands::ClearChat(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::ClearMsg(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::HostTarget(x)) => {
-                            if let Some(tx) = map.get(x.source()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.source(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.source()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::Join(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::Notice(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::Part(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::Privmsg(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::RoomState(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::UserNotice(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(Commands::UserState(x)) => {
-                            if let Some(tx) = map.get(x.channel()) {
-                                if let Err(e) = tx.try_send(x.raw().into()) {
-                                    log::warn!(
-                                        "failed to send IRC to matching handler {}: {}",
-                                        x.channel(),
-                                        e
-                                    );
-                                }
-                            } else {
-                                log::warn!(
-                                    "received IRC message for unknown channel {}",
-                                    x.channel()
-                                )
-                            }
-                        }
-                        Status::Message(x) => {
-                            log::trace!("received IRC command: {:?}", x);
-                        }
+                async fn _connect() -> Result<AsyncRunner, twitchchat::runner::Error> {
+                    use twitchchat::{
+                        connector::async_std::ConnectorTls, twitch::Capability, UserConfig,
                     };
+
+                    let conn = ConnectorTls::twitch()?;
+                    let config = UserConfig::builder()
+                        .anonymous()
+                        .capabilities(&[Capability::Tags])
+                        .build()
+                        .unwrap();
+
+                    let runner = AsyncRunner::connect(conn, &config).await?;
+                    log::info!("connected to the IRC server");
+                    log::trace!("IRC identity: {:?}", runner.identity);
+
+                    Ok(runner)
                 }
-            }
 
-            let map = self.map;
-            let mut try_count: u8 = 0;
-            while try_count <= 10 {
-                if let Ok(mut runner) = _connect().await {
-                    try_count = 0;
+                async fn _handle(
+                    mut runner: AsyncRunner,
+                    map: &HashMap<Box<str>, IrcSend>,
+                ) -> Result<(), twitchchat::runner::Error> {
+                    loop {
+                        let msg = runner.next_message().await?;
 
-                    for channel in map.keys() {
-                        if let Err(e) = runner.join(&(**channel)[1..]).await {
-                            log::warn!("error while joining channel {}: {}", channel, e);
+                        // I could probably make a macro for this... but I'm laaaaazy :P
+                        match msg {
+                            x @ (Status::Quit | Status::Eof) => {
+                                log::info!("Received signal {x:?}; shuttind down irc!");
+                                return Ok(());
+                            }
+                            Status::Message(Commands::Raw(raw)) => {
+                                log::trace!("Recieved raw IRC message: {}", raw.get_raw());
+                                continue;
+                            }
+                            Status::Message(Commands::ClearChat(x)) => try_send!(map, x),
+                            Status::Message(Commands::ClearMsg(x)) => try_send!(map, x),
+                            Status::Message(Commands::HostTarget(x)) => {
+                                try_send!(map, x.source(), x.raw())
+                            }
+                            Status::Message(Commands::Join(x)) => try_send!(map, x),
+                            Status::Message(Commands::Notice(x)) => try_send!(map, x),
+                            Status::Message(Commands::Part(x)) => try_send!(map, x),
+                            Status::Message(Commands::Privmsg(x)) => try_send!(map, x),
+                            Status::Message(Commands::RoomState(x)) => try_send!(map, x),
+                            Status::Message(Commands::UserNotice(x)) => try_send!(map, x),
+                            Status::Message(Commands::UserState(x)) => try_send!(map, x),
+                            Status::Message(x) => log::trace!("received IRC command: {x:?}"),
+                        };
+                    }
+                }
+
+                let map = self.map;
+                let mut try_count: u8 = 0;
+                while try_count <= 10 {
+                    if let Ok(mut runner) = _connect().await {
+                        try_count = 0;
+
+                        for channel in map.keys() {
+                            if let Err(e) = runner.join(&(**channel)[1..]).await {
+                                log::warn!("error while joining channel {channel}: {e:?}");
+                            }
+                        }
+
+                        log::trace!("irc map: {map:?}");
+
+                        if let Err(e) = _handle(runner, &map).await {
+                            log::error!("error while listening to irc: {e:?}");
+                        } else {
+                            return;
                         }
                     }
 
-                    log::trace!("irc map: {:?}", map);
-
-                    if let Err(e) = _handle(runner, &map).await {
-                        log::error!("error while listening to irc: {}", e);
-                    } else {
-                        return;
-                    }
+                    async_std::task::sleep(Duration::from_secs(60)).await;
+                    try_count += 1;
+                    continue;
                 }
-
-                async_std::task::sleep(Duration::from_secs(60)).await;
-                try_count += 1;
-                continue;
-            }
-        });
+            })
+            .expect("cannot spawn task");
     }
 }
 

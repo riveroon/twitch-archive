@@ -1,44 +1,52 @@
-mod eventsub;
-use eventsub::event::*;
-
-mod helix;
-use helix::{HelixAuth, Stream, User};
-
-mod args;
-use args::*;
-
-mod irc;
-use irc::IrcRecv;
-
-mod filename;
-mod fs_utils;
-mod rand;
-mod hls;
-
+use anyhow::{anyhow, Context};
+use async_once_cell::OnceCell;
 use async_std::{
     fs,
     io::{self, WriteExt},
     path,
+    sync::Arc,
+    task,
 };
+use core::time;
 use futures::{channel::oneshot, StreamExt, TryStreamExt};
+
+use args::*;
+use eventsub::event::*;
+use fs_utils::san;
+use helix::{HelixAuth, Stream, User};
+use irc::IrcRecv;
+use prelude::*;
+
+mod args;
+mod eventsub;
+mod filename;
+mod fs_utils;
+mod helix;
+mod hls;
+mod irc;
+mod logger;
+mod prelude;
+mod rand;
 
 const CHAT_BUFFER: usize = 16384;
 const RAND_DIR_LEN: usize = 12;
 const ASYNC_BUF_FACTOR: usize = 8;
 
-use async_once_cell::OnceCell;
-
 static FORMATTER: OnceCell<(filename::Formatter, bool)> = OnceCell::new();
 static TW_STREAM_AUTH: OnceCell<Box<str>> = OnceCell::new();
 
-async fn datafile(path: &path::Path, stream: &Stream) -> io::Result<()> {
-    use chrono::{DateTime, Local, SecondsFormat};
-    use serde::Serialize;
+async fn datafile(
+    path: &path::Path,
+    stream: &Stream,
+    stream_data: Option<&hls::StreamData>,
+) -> Result<()> {
+    use chrono::SecondsFormat;
 
     #[derive(Serialize)]
     struct Data<'a> {
+        version: String,
         data: StreamSer<'a>,
-        segments: Vec<Segments>,
+        segments: Vec<Segments<'a>>,
     }
 
     #[derive(Serialize)]
@@ -57,32 +65,55 @@ async fn datafile(path: &path::Path, stream: &Stream) -> io::Result<()> {
     }
 
     #[derive(Serialize)]
-    struct Segments {
-        timestamp: String,
+    struct Segments<'a> {
+        path: String,
+        group_id: &'a str,
+        name: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        language: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_bitrate: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bitrate: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resolution: Option<Resolution>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        frame_rate: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        codecs: Option<&'a str>,
     }
 
-    let datapath = path.join("stream.json");
+    #[derive(Serialize)]
+    struct Resolution {
+        width: u64,
+        height: u64,
+    }
+
+    let datapath = path.join("info.json");
     let mut file = fs::File::create(&datapath).await?;
-    let segments: io::Result<Vec<Segments>> = fs::read_dir(&path)
-        .await?
-        .try_filter_map(|entry| async move {
-            if entry
-                .file_name()
-                .to_str()
-                .map(|x| x.ends_with(".m3u8"))
-                .unwrap_or(false)
-            {
-                let time: DateTime<Local> = fs::metadata(&entry.path()).await?.created()?.into();
-                let timestamp = time.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-                Ok(Some(Segments { timestamp }))
-            } else {
-                Ok(None)
-            }
-        })
-        .try_collect()
-        .await;
+    let (segpath, alt, var);
+    let segments = if let Some(x) = stream_data {
+        (segpath, alt, var) = (&x.0, &x.1, &x.2);
+        vec![Segments {
+            path: segpath.to_string_lossy().into_owned(),
+            group_id: alt.group_id.as_str(),
+            name: alt.name.as_str(),
+            language: alt.language.as_deref(),
+            max_bitrate: var.as_ref().map(|x| x.bandwidth),
+            bitrate: var.as_ref().and_then(|x| x.average_bandwidth),
+            resolution: var.as_ref().and_then(|x| x.resolution).map(|x| Resolution {
+                width: x.width,
+                height: x.height,
+            }),
+            frame_rate: var.as_ref().and_then(|x| x.frame_rate),
+            codecs: var.as_ref().and_then(|x| x.codecs.as_deref()),
+        }]
+    } else {
+        vec![]
+    };
 
     let data = Data {
+        version: format!("0.1/{}", args::VERSION),
         data: StreamSer {
             id: stream.id(),
             user: stream.user(),
@@ -95,27 +126,25 @@ async fn datafile(path: &path::Path, stream: &Stream) -> io::Result<()> {
                 .started_at()
                 .to_rfc3339_opts(SecondsFormat::AutoSi, true),
         },
-        segments: segments?,
+        segments,
     };
 
     file.write_all(&serde_json::to_vec(&data)?).await?;
-    file.sync_all().await
+    file.sync_all().await.map_err(From::from)
 }
 
 async fn chat_log(
     rx: IrcRecv,
-    path: &path::Path,
-    start_time: chrono::DateTime<chrono::Local>,
+    path: impl AsRef<path::Path>,
     mut noti: futures::channel::oneshot::Receiver<()>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use chrono::{Duration, Local};
+) -> Result<()> {
     use futures::{
         future::{select, Either},
         io::BufWriter,
     };
 
     if !rx.open() {
-        return Err("irc channel was unexpectedly open!".into());
+        return Err(anyhow!("irc channel was unexpectedly open!"));
     }
 
     let mut file = BufWriter::with_capacity(
@@ -140,26 +169,15 @@ async fn chat_log(
             }
         };
 
-        log::trace!("received irc message: {}", msg);
-
-        let ts = Local::now() - start_time;
-
-        if ts < Duration::zero() {
-            continue;
-        }
-
-        file.write_all(ts.to_string().as_bytes()).await?;
-        file.write_all(b": ").await?;
         file.write_all(msg.as_bytes()).await?;
     }
 }
 
-async fn cmd(program: &str, args: &[&str], output: bool) -> Result<Option<String>, ()> {
-    use async_process::Stdio;
-    use std::time::{Duration, UNIX_EPOCH};
+async fn cmd(program: &str, args: &[&str], output: bool) -> Result<Option<String>> {
+    use async_std::process::Stdio;
 
-    log::trace!("running command :{} {:?}", program, args);
-    let out = async_process::Command::new(program)
+    log::trace!("running command :{program} {args:?}");
+    let out = async_std::process::Command::new(program)
         .args(args)
         .stdout(if output {
             Stdio::piped()
@@ -167,76 +185,57 @@ async fn cmd(program: &str, args: &[&str], output: bool) -> Result<Option<String
             Stdio::null()
         })
         .output()
-        .await
-        .map_err(|e| log::error!("error while executing {}: {}", program, e))?;
+        .await?;
 
     if out.status.success() {
         if output {
-            return String::from_utf8(out.stdout).map(Some).map_err(|e| {
-                log::error!("{}: output was not valid utf-8: {}", program, e);
-            });
+            return String::from_utf8(out.stdout).map(Some).map_err(From::from);
         } else {
             return Ok(None);
         }
     };
 
-    let t = UNIX_EPOCH.elapsed().unwrap_or(Duration::ZERO).as_secs();
-    let log = format!("[{}] twitch-archiver @ {}.log", t, program);
+    let (logpath, mut file) = fs_utils::create_dedup_file(path::Path::new(&format!(
+        "{}.{}.log",
+        task::current().name().unwrap_or("<unknown>"),
+        san(program)
+    )))
+    .await?;
 
     log::error!(
-        "{}: command exited with status {}: logged at {}",
-        program,
+        "{program} exited with status {}: logging at {}",
         out.status.code().unwrap_or(-1),
-        &log
+        logpath.display()
     );
 
-    let _ = async_std::fs::write(&log, &out.stderr).await;
-    Err(())
+    file.write_all(&out.stderr).await?;
+    Err(anyhow!("program exited abnormally!"))
 }
 
-async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Result<(), ()> {
-    async fn _stream(path: path::PathBuf, stream: &Stream, format: &str) -> Result<(), ()> {
-        log::debug!(
-            "download location for stream {}: {}",
-            stream.id(),
-            path.to_string_lossy()
-        );
+async fn download(stream: Stream, chat: IrcRecv, chn: ChannelSettings) -> Result<()> {
+    async fn _stream(
+        path: path::PathBuf,
+        stream: &Stream,
+        format: &str,
+    ) -> Result<Option<hls::StreamData>> {
+        log::debug!("download location: {}", path.display());
 
         let link = format!("https://twitch.tv/{}", stream.user().login());
-        let mut args = vec![
-            "--stream-url",
-            &link,
-        ];
+        let mut args = vec!["--stream-url", &link];
 
         if let Some(x) = TW_STREAM_AUTH.get() {
             args.insert(0, "--twitch-api-header");
             args.insert(1, x);
         }
 
-        let Ok(Some(url)) = cmd("streamlink", &args, true).await else {
-            log::error!("failed to fetch hls playlist for stream #{}", stream.id());
-            return Err(());
-        };
-
-        hls::download(url, &path, format.split(',').map(|x| x.trim())).await
-    }
-
-    async fn _chat(
-        path: path::PathBuf,
-        stream: Stream,
-        chat: IrcRecv,
-        noti: oneshot::Receiver<()>,
-    ) -> Result<(), ()> {
-        return chat_log(chat, &path.join("chat"), stream.started_at(), noti)
+        let url = cmd("streamlink", &args, true)
             .await
-            .map_err(|e| {
-                log::error!(
-                    "error while logging chat {} for stream {}: {}",
-                    stream.user(),
-                    stream.id(),
-                    e
-                )
-            });
+            .context("failed to fetch hls playlist url")?
+            .unwrap();
+
+        hls::download(url, &path, format.split(',').map(|x| x.trim()))
+            .await
+            .context("failed to download hls playlist")
     }
 
     async fn _dl(
@@ -244,19 +243,21 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
         stream: &Stream,
         chat: &IrcRecv,
         chn: &ChannelSettings,
-    ) -> Result<(), ()> {
-        use async_std::task::spawn;
-
+    ) -> Result<Option<hls::StreamData>> {
         let (tx, rx) = oneshot::channel();
 
-        let chat_handle = spawn(_chat(path.clone(), stream.clone(), chat.clone(), rx));
+        let chat_handle = task::Builder::new()
+            .name(task::current().name().unwrap_or_default().to_owned())
+            .local(chat_log(chat.clone(), path.join("chat.log"), rx))
+            .context("failed to download chat")?;
         let res = _stream(path, stream, &chn.format).await;
 
-        tx.send(())?;
-        return chat_handle.await.and(res);
+        tx.send(())
+            .or(Err(anyhow!("notification channel dropped before send")))?;
+        chat_handle.await.and(res)
     }
 
-    async fn move_dir(orig: &path::Path, dest: &path::Path) -> io::Result<Box<path::Path>> {
+    async fn move_dir(orig: &path::Path, dest: &path::Path) -> Result<Box<path::Path>> {
         let dir = fs_utils::create_dedup_dir(dest).await?;
         // see async-std issue#1053
         fs::read_dir(&orig)
@@ -274,7 +275,7 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
         Ok(dir)
     }
 
-    async fn tar(tarpath: &path::Path, path: &path::Path) -> io::Result<Box<path::Path>> {
+    async fn tar(tarpath: &path::Path, path: &path::Path) -> Result<Box<path::Path>> {
         let (tarpath, tarfile) = fs_utils::create_dedup_file(tarpath).await?;
         let mut tar = async_tar::Builder::new(tarfile);
 
@@ -289,10 +290,18 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
         while let Some(x) = dir_entry.next().await {
             let (is_dir, entry) = x?;
             if is_dir {
-                log::trace!("appending directory {}: {}", entry.path().to_string_lossy(), entry.file_name().to_string_lossy());
+                log::trace!(
+                    "appending directory {}: {}",
+                    entry.path().display(),
+                    entry.file_name().to_string_lossy()
+                );
                 tar.append_dir_all(entry.file_name(), &entry.path()).await?;
             } else {
-                log::trace!("appending file {}: {}", entry.path().to_string_lossy(), entry.file_name().to_string_lossy());
+                log::trace!(
+                    "appending file {}: {}",
+                    entry.path().display(),
+                    entry.file_name().to_string_lossy()
+                );
                 tar.append_path_with_name(&entry.path(), entry.file_name())
                     .await?;
             };
@@ -304,7 +313,7 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
     }
 
     let (fmt, to_dir) = FORMATTER.get().unwrap();
-    let filename = fmt.format(stream);
+    let filename = fmt.format(&stream);
     let path = if *to_dir {
         path::Path::new(&filename).to_path_buf()
     } else {
@@ -312,76 +321,139 @@ async fn download(stream: &Stream, chat: &IrcRecv, chn: &ChannelSettings) -> Res
     };
 
     log::info!(
-        "downloading stream #{} for channel {}: {}",
+        "downloading stream #{} for channel {}",
         stream.id(),
-        stream.user(),
-        filename
+        stream.user()
     );
 
     //Create a folder as a temporary download directory
     let dl_path = loop {
         let new_path = path::Path::new(".download").join(rand::rand_hex(RAND_DIR_LEN));
-        if fs_utils::create_new_dir(&new_path).await.map_err(|e| {
-            log::error!(
-                "error while creating temporary directory {:?}: {}",
-                new_path.to_string_lossy(),
-                e
-            )
-        })? {
+        if fs_utils::create_new_dir(&new_path)
+            .await
+            .context("cannot create temporary directory")?
+        {
             break new_path;
         }
     };
 
-    let res = _dl(dl_path.clone(), stream, chat, chn).await;
+    let res = match _dl(dl_path.clone(), &stream, &chat, &chn).await {
+        Ok(Some(x)) => Ok(x),
+        Ok(None) => {
+            return fs::remove_dir_all(&dl_path)
+                .await
+                .context("failed to clean up download directory")
+        }
+        Err(e) => Err(e),
+    };
 
-    datafile(&dl_path, stream).await.map_err(|e| {
-        log::error!(
-            "could not write datafile to {:?}: {}",
-            dl_path.to_string_lossy(),
-            e
-        )
-    })?;
+    datafile(&dl_path, &stream, res.as_ref().ok())
+        .await
+        .context("could not write datafile")?;
 
     return if *to_dir {
         move_dir(&dl_path, &path)
             .await
-            .map(|x| {
-                log::info!(
-                    "finished downloading stream #{} from {}: {}",
-                    stream.id(),
-                    stream.user(),
-                    x.to_string_lossy()
-                )
-            })
-            .map_err(|e| {
-                log::error!(
-                    "could not move directory {:?} to {:?}: {}",
-                    dl_path.to_string_lossy(),
-                    path.to_string_lossy(),
-                    e
-                )
-            })
+            .map(|x| log::info!("finished downloading: {}", x.display()))
+            .context("could not move directory")
     } else {
-        tar(&path, &dl_path)
-            .await
-            .map(|x| {
-                log::info!(
-                    "finished downloading stream #{} from {}: {}",
-                    stream.id(),
-                    stream.user(),
-                    x.to_string_lossy()
-                )
-            })
-            .map_err(|e| {
-                log::error!(
-                    "could not make tar {:?} from contents of directory {:?}: {:?}",
-                    path.to_string_lossy(),
-                    dl_path.to_string_lossy(),
-                    e
-                )
-            })
-            .and(res)
+        res.and(
+            tar(&path, &dl_path)
+                .await
+                .map(|x| log::info!("finished downloading: {}", x.display()))
+                .context("could not make tar archive"),
+        )
     };
+}
+
+async fn listen(
+    auth: HelixAuth,
+    events: Arc<eventsub::EventSub>,
+    user: User,
+    rx: IrcRecv,
+    settings: ChannelSettings,
+) {
+    loop {
+        let sub = match events
+            .subscribe::<stream::Online>(stream::OnlineCond::from_id(user.id()))
+            .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                log::error!("could not subscribe to event 'stream.online': {e:?}");
+                return;
+            }
+        };
+
+        log::debug!("subscribed to event `stream.online`");
+
+        'listen: loop {
+            let msg = match sub.recv().await {
+                Ok(Some(x)) => x,
+                Ok(None) => {
+                    log::warn!("subscription revoked: {:?}", sub.status());
+                    break;
+                }
+                Err(e) => {
+                    log::error!(
+                        "unexpected error while trying to recieve message from webhook: {e:?}"
+                    );
+                    break;
+                }
+            };
+            log::debug!("received event for stream #{}", msg.id());
+
+            let stream = {
+                let mut count = 0;
+                'get_streams: loop {
+                    match helix::get_streams(
+                        auth.clone(),
+                        std::iter::once(helix::StreamFilter::User(msg.user())),
+                    )
+                    .try_next()
+                    .await
+                    {
+                        Ok(Some(x)) => break x,
+                        Ok(None) => {
+                            // Due to caching, the Get Streams api may not return a value even though if the stream is online.
+                            // Therefore, the current (temporary) solution is to poll the api until it returns something.
+                            // This will change in the future since retrieving and downloading the stream works regardless of
+                            // this api returning nothing.
+                            // The current wait limit is set to 2 minutes, which seems to be about the timepoint when the api
+                            // reliabely returns something.
+                            log::warn!("streams matching criteria not found; expected stream #{} ({count})", msg.id());
+                            count += 1;
+                            if count >= 12 {
+                                continue 'listen;
+                            }
+                            task::sleep(time::Duration::from_secs(10)).await;
+                            continue 'get_streams;
+                        }
+                        Err(e) => {
+                            log::error!("could not fetch stream object from endpoint: {e:?}");
+                            continue 'listen;
+                        }
+                    };
+                }
+            };
+            log::debug!("fetched stream object for stream #{}", stream.id());
+
+            let task = match task::Builder::new()
+                .name(format!("#{}", stream.id()))
+                .spawn(download(stream, rx.clone(), settings.clone()))
+            {
+                Ok(x) => x,
+                Err(e) => {
+                    log::error!("failed to spawn task: {e:?}");
+                    continue;
+                }
+            };
+
+            if let Err(e) = task.await {
+                log::error!("download failed: {e:?}");
+            }
+        }
+    }
 }
 
 async fn archive(
@@ -400,69 +472,19 @@ async fn archive(
     )
     .await;
 
+    let shared = Arc::new(events);
+
     join_all(channels.into_iter().map(|(user, rx, settings)| {
-        let auth = &auth;
-        let events = &events;
-        async move {
-            loop {
-                let id = user.id();
-
-                let sub = match events
-                    .subscribe::<stream::Online>(stream::OnlineCond::from_id(id))
-                    .await
-                {
-                    Ok(x) => x,
-                    Err(e) => {
-                        log::error!(
-                            "could not subscribe to event 'stream.online' for user {}: {}",
-                            &id,
-                            e
-                        );
-                        return;
-                    }
-                };
-
-                log::debug!("subscribed to event 'stream.online' for user {}", id);
-
-                loop {
-                    let msg = match sub.recv().await {
-                        Ok(Some(x)) => x,
-                        Ok(None) => {
-                            log::warn!("subscription revoked: {:?}", sub.status());
-                            break;
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "unexpected error while trying to recieve message from webhook: {}",
-                                e
-                            );
-                            break;
-                        }
-                    };
-                    log::debug!("received event for stream #{}", msg.id());
-
-                    let stream = match helix::get_streams(
-                        auth.clone(),
-                        std::iter::once(helix::StreamFilter::User(msg.user())),
-                    )
-                    .try_next()
-                    .await
-                    {
-                        Ok(Some(x)) => x,
-                        Ok(None) => continue,
-                        Err(e) => {
-                            log::error!("could not fetch stream object from endpoint: {}", e);
-                            continue;
-                        }
-                    };
-                    log::debug!("fetched stream object for stream #{}", stream.id());
-
-                    if download(&stream, &rx, &settings).await.is_err() {
-                        log::error!("download failed!");
-                    }
-                }
-            }
-        }
+        task::Builder::new()
+            .name(format!("user-{}", user.id()))
+            .local(listen(
+                auth.clone(),
+                Arc::clone(&shared),
+                user,
+                rx,
+                settings,
+            ))
+            .unwrap()
     }))
     .await;
 }
@@ -470,10 +492,14 @@ async fn archive(
 async fn run(argv: Argv) {
     use futures::future::join_all;
 
+    logger::init(argv.log_output, argv.log_level, argv.log_stderr);
+
+    log::info!("twitch-archive version {} © 2023. riveroon", args::VERSION);
+
     let auth = match HelixAuth::new(argv.client_id, argv.client_secret).await {
         Ok(x) => x,
         Err(e) => {
-            log::error!("error while obtaining helix authorization:\n\t{:?}", e);
+            log::error!("error while obtaining helix authorization:\n\t{e:?}");
             return;
         }
     };
@@ -491,10 +517,10 @@ async fn run(argv: Argv) {
                 UserCredentials::Full { id, login, name } => User::new(id, login, name),
                 UserCredentials::Id { id } => User::from_id(&id, &auth)
                     .await
-                    .map_err(|e| log::error!("could not retrieve user with id {:?}: {}", id, e))?,
+                    .map_err(|e| log::error!("could not retrieve user with id {id:?}: {e:?}"))?,
                 UserCredentials::Login { login } => {
                     User::from_login(&login, &auth).await.map_err(|e| {
-                        log::error!("could not retrieve user with login {:?}: {}", login, e)
+                        log::error!("could not retrieve user with login {login:?}: {e:?}")
                     })?
                 }
             };
@@ -524,17 +550,17 @@ async fn run(argv: Argv) {
             .https()
             .port(argv.server_port)
             .run()
+            .await
             .unwrap();
 
-        let public_url = tunnel.public_url().unwrap();
-        log::info!("ngrok tunnel started at: {}", &public_url);
+        let public_url = tunnel.public_url().await.unwrap();
+        log::info!("ngrok tunnel started at: {public_url}");
 
         archive(auth, argv.server_port, public_url, v).await;
     }
 }
 
 fn main() {
-    env_logger::init();
     let argv = parse_args();
     futures::executor::block_on(run(argv));
 }

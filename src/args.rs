@@ -1,25 +1,26 @@
+use async_once_cell::OnceCell;
 use std::{env, fs};
 
-use async_once_cell::OnceCell;
-use serde::Deserialize;
-
-use crate::filename::Formatter;
+use crate::{filename::Formatter, prelude::*};
 
 static NAME: OnceCell<Box<str>> = OnceCell::new();
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Argv {
     pub client_id: String,
     pub client_secret: String,
+    pub fmt: Formatter,
+    pub log_output: String,
+    pub log_level: log::LevelFilter,
+    pub log_stderr: bool,
     pub server_port: u16,
     pub server_addr: Option<String>,
-    pub fmt: Formatter,
     pub save_to_dir: bool,
     pub twitch_auth_header: Option<String>,
     pub channels: Vec<(UserCredentials, ChannelSettings)>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ChannelSettings {
     pub format: String,
 }
@@ -65,6 +66,16 @@ fn help() -> String {
             \nARGS:\
             \n  -C, --client-id      <str>  The client authorization id .\
             \n  -S, --client-secret  <str>  The client authorization secret .\
+            \n  -f, --file-name      <str>  Formats the output file name.\
+            \n                              See below for more information.\
+            \n                              (Default: \"%Sl\\[%si] %st\")\
+            \n  --log-output         <path> Write log output to file.\
+            \n                              When empty, does not log to file.\
+            \n                              (Default: `archive.log`)
+            \n  --log-level          <str>  Sets the log level threshold for stdout.\
+            \n                              Valid levels are:\
+            \n                                `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`, `OFF`\
+            \n  --log-stderr                Redirects log output to stderr.\
             \n  -P, --server-port    <u16>  The address for the webhook to listen to.\
             \n                              (Default: 8080)\
             \n  -A, --server-addr    <str>  The host address the server will receive requests to.\
@@ -73,11 +84,8 @@ fn help() -> String {
             \n  -d, --sub-data       <path> The location where the subscription list is saved.\
             \n                              The contents should follow a specific json format;\
             \n                              See below for more information.\
-            \n                              (Default: \"subscriptions.json\")\
-            \n  -f, --file-name      <str>  Formats the output file name.\
-            \n                              See below for more information.\
-            \n                              (Default: \"%Sl\\[%si] %st\")\
-            \n  --save-to-dir               Whether to save the outputs to a directory.\
+            \n                              (Default: `subscriptions.json`)\
+            \n  --save-to-dir               Save the output to a directory.\
             \n                              If not set, downloads will be archived to a .tar file.\
             \n  --twitch-auth-header <str>  Authentication header to pass to streamlink for\
             \n                              acquiring stream access tokens.\
@@ -102,7 +110,7 @@ fn help() -> String {
             \n  [\
             \n    {{\"id\": \"0000000\"}},\
             \n    {{\"id\": \"0000001\", \"format\": \"audio\"}},\
-            \n    {{\"login\": \"twitch\"}},
+            \n    {{\"login\": \"twitch\"}},\
             \n  ]\
             \n\
             \nFILE NAME FORMATTING:\
@@ -149,10 +157,13 @@ pub fn parse_args() -> Argv {
 
     let mut client_id = None;
     let mut client_secret = None;
+    let mut file_name = "%Sl\\[%si] %st".to_owned();
+    let mut log_output = "archive.log".to_owned();
+    let mut log_level = log::LevelFilter::Info;
+    let mut log_stderr = false;
     let mut server_port = 8080;
     let mut server_addr = None;
-    let mut sub_data = Some("subscriptions.json".to_owned());
-    let mut file_name = "%Sl\\[%si] %st".to_owned();
+    let mut sub_data = "subscriptions.json".to_owned();
     let mut save_to_dir = false;
     let mut twitch_auth_header = None;
 
@@ -174,6 +185,23 @@ pub fn parse_args() -> Argv {
                     std::process::exit(1);
                 }
             }
+            "--log-output" => {
+                log_output = if let Some(x) = argv.next() {
+                    x
+                } else {
+                    type_err("str", &x);
+                    std::process::exit(1);
+                }
+            }
+            "--log-level" => {
+                log_level = if let Some(x) = argv.next() {
+                    x.parse().expect("unexpected value after --log-level")
+                } else {
+                    type_err("str", &x);
+                    std::process::exit(1);
+                }
+            }
+            "--log-stderr" => log_stderr = true,
             "-P" | "--server-port" => {
                 server_port = if let Some(x) = argv.next().and_then(|x| x.parse().ok()) {
                     x
@@ -192,7 +220,7 @@ pub fn parse_args() -> Argv {
             }
             "-d" | "--sub-data" => {
                 sub_data = if let Some(x) = argv.next() {
-                    Some(x)
+                    x
                 } else {
                     type_err("path", &x);
                     std::process::exit(1);
@@ -242,14 +270,10 @@ pub fn parse_args() -> Argv {
         eprint_err("File names cannot be an empty string!");
         std::process::exit(1);
     };
-    let Some(sub_data) = sub_data else {
-        eprint_err("Subscription data file missing!");
-        std::process::exit(1);
-    };
     let sub = match fs::read(sub_data) {
         Ok(x) => x,
         Err(e) => {
-            eprint_err(&format!("sub-data file is missing or corrupt: {}", e));
+            eprint_err(&format!("sub-data file is missing or corrupt: {e}"));
             std::process::exit(2);
         }
     };
@@ -269,6 +293,9 @@ pub fn parse_args() -> Argv {
     Argv {
         client_id,
         client_secret,
+        log_output,
+        log_level,
+        log_stderr,
         server_port,
         server_addr,
         fmt: Formatter::new(&file_name),

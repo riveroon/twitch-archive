@@ -1,12 +1,13 @@
+use async_std::sync::Mutex;
+use futures::Future;
+use serde::de::DeserializeOwned;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-
-use async_std::sync::Mutex;
-use futures::Future;
-use serde::Deserialize;
 use surf::http::mime;
+
+use crate::prelude::*;
 
 const AUTH_API: &str = "https://id.twitch.tv/oauth2/token";
 
@@ -18,23 +19,32 @@ struct Inner {
 }
 
 impl Inner {
-    async fn _get(client_id: &str, secret: &str) -> surf::Result<(Box<str>, Instant)> {
+    async fn _get(client_id: &str, secret: &str) -> Result<(Box<str>, Instant)> {
         #[derive(Deserialize)]
         struct AuthRes {
             access_token: String,
             expires_in: u64,
         }
 
-        let res: AuthRes = surf::post(AUTH_API)
-            .body_string(format!(
-                "client_id={}\
+        let res: AuthRes = {
+            let mut res = surf::post(AUTH_API)
+                .body_string(format!(
+                    "client_id={}\
                 &client_secret={}\
                 &grant_type={}",
-                client_id, secret, "client_credentials"
-            ))
-            .content_type(mime::FORM)
-            .recv_json()
-            .await?;
+                    client_id, secret, "client_credentials"
+                ))
+                .content_type(mime::FORM)
+                .send()
+                .await
+                .map_err(|e| e.into_inner())?;
+
+            if !res.status().is_success() {
+                return Err(anyhow!("authorization returned status {}", res.status()));
+            }
+
+            res.body_json().await.map_err(|e| e.into_inner())?
+        };
 
         log::debug!("retrieved auth: expires in {}", res.expires_in);
 
@@ -44,7 +54,7 @@ impl Inner {
         ))
     }
 
-    async fn get(client_id: String, secret: &str) -> surf::Result<Self> {
+    async fn get(client_id: String, secret: &str) -> Result<Self> {
         let (auth, expires) = Self::_get(&client_id, secret).await?;
 
         Ok(Self {
@@ -61,7 +71,7 @@ impl Inner {
             > 0
     }
 
-    async fn refresh(&mut self, secret: &str) -> surf::Result<()> {
+    async fn refresh(&mut self, secret: &str) -> Result<()> {
         (self.auth, self.expires) = Self::_get(&self.client_id, secret).await?;
         Ok(())
     }
@@ -73,7 +83,7 @@ pub struct HelixAuth {
 }
 
 impl HelixAuth {
-    pub async fn new(client_id: String, secret: String) -> surf::Result<Self> {
+    pub async fn new(client_id: String, secret: String) -> Result<Self> {
         Inner::get(client_id, &secret).await.map(|x| Self {
             inner: Arc::new(Mutex::new((x, secret.into_boxed_str()))),
         })
@@ -83,7 +93,7 @@ impl HelixAuth {
         (*self.inner.lock().await).0.has_expired()
     }
 
-    pub async fn refresh(&mut self) -> surf::Result<()> {
+    pub async fn refresh(&mut self) -> Result<()> {
         let (inner, secret) = &mut *self.inner.lock().await;
         inner.refresh(secret).await?;
         Ok(())
@@ -113,33 +123,46 @@ impl HelixAuth {
         f(client_id).await
     }
 
-    pub async fn send(&self, req: surf::Request) -> surf::Result<surf::Response> {
+    pub async fn send_req(&self, req: surf::Request) -> Result<surf::Response> {
         async fn _send(
             auth: &HelixAuth,
             mut req: surf::Request,
             refresh: bool,
-        ) -> surf::Result<surf::Response> {
+        ) -> Result<surf::Response> {
             let mut lock = auth.inner.lock().await;
+
             let (inner, secret) = &mut *lock;
             if refresh {
-                inner.refresh(secret).await?;
+                inner.refresh(secret).await?
             }
             req.insert_header("Authorization", &*lock.0.auth);
             req.insert_header("Client-Id", &*lock.0.client_id);
+
             drop(lock);
+
             log::trace!("sending request: {:?}", req);
-            return surf::client().send(req).await;
+            surf::client().send(req).await.map_err(|e| e.into_inner())
         }
 
         use surf::StatusCode;
         let b = req.clone();
         let res = _send(self, req, false).await?;
 
-        if res.status() != StatusCode::Unauthorized {
-            return Ok(res);
-        };
+        match res.status() {
+            StatusCode::Unauthorized => (),
+            x if x.is_success() => return Ok(res),
+            x => return Err(anyhow!("request returned status {}", x)),
+        }
 
         log::info!("received status code 401; refreshing auth");
         _send(self, b, true).await
+    }
+
+    pub async fn send_req_json<T: DeserializeOwned>(&self, req: surf::Request) -> Result<T> {
+        self.send_req(req)
+            .await?
+            .body_json()
+            .await
+            .map_err(|e| e.into_inner())
     }
 }

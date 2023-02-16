@@ -1,9 +1,10 @@
-use super::SubscriptionType;
 use async_std::channel::Receiver;
 use atomic::{Atomic, Ordering};
-use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{marker::PhantomData, sync::Arc};
+
+use super::SubscriptionType;
+use crate::prelude::*;
 
 #[derive(Clone, PartialEq, Eq, Hash, Deserialize)]
 pub struct SubUnique {
@@ -130,8 +131,8 @@ pub enum RecvError {
 impl std::fmt::Display for RecvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChannelClosed(e) => write!(f, "subscription failed to receive event: {}", e),
-            Self::ParseError(e) => write!(f, "subscription failed to parse event: {}", e),
+            Self::ChannelClosed(e) => write!(f, "subscription failed to receive event: {e}"),
+            Self::ParseError(e) => write!(f, "subscription failed to parse event: {e}"),
         }
     }
 }

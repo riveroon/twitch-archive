@@ -1,6 +1,18 @@
 use async_std::{fs, io, path};
+use sanitize_filename::{sanitize_with_options, Options};
 
 const MAX_FILENAME_DUP: usize = 65536;
+
+pub fn san(value: &str) -> String {
+    sanitize_with_options(
+        value,
+        Options {
+            truncate: false,
+            replacement: "_",
+            ..Options::default()
+        },
+    )
+}
 
 pub async fn create_new_file(path: &path::Path) -> io::Result<Option<fs::File>> {
     log::trace!("download::create_new_file: {}", path.to_string_lossy());

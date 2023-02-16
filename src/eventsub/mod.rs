@@ -1,17 +1,18 @@
-use super::HelixAuth;
-use async_std::channel::Sender;
+use anyhow::Context;
+use async_std::{channel::Sender, sync::Arc};
 use atomic::{Atomic, Ordering};
-use futures::lock::Mutex;
-use serde::{Deserialize, Serialize};
+use dashmap::DashMap;
 use serde_json::value::RawValue;
-use std::{collections::HashMap, sync::Arc};
 use tide::{Request, Response};
 
-pub mod event;
-use event::SubscriptionType;
+use super::HelixAuth;
+use crate::{prelude::*, rand};
 
-mod subscription;
+use event::SubscriptionType;
 pub use subscription::*;
+
+pub mod event;
+mod subscription;
 
 const EVENTSUB_API: &str = "https://api.twitch.tv/helix/eventsub/subscriptions";
 
@@ -34,8 +35,7 @@ const MSG_VERIFICATION: &str = "webhook_callback_verification";
 const MSG_REVOCATION: &str = "revocation";
 
 type Secret = Box<str>;
-type State =
-    Arc<Mutex<HashMap<SubUnique, (Arc<Atomic<SubStatus>>, Secret, Sender<Box<RawValue>>)>>>;
+type State = DashMap<SubUnique, (Arc<Atomic<SubStatus>>, Secret, Sender<Box<RawValue>>)>;
 
 async fn callback(mut req: Request<State>) -> tide::Result {
     fn err_state(state: SubStatus) -> tide::Result {
@@ -63,7 +63,7 @@ async fn callback(mut req: Request<State>) -> tide::Result {
             req.header(MSG_TIME),
             req.header(MSG_SIG)
         ) else {
-            log::debug!("required header for hmac verification was empty");
+            log::warn!("required header for hmac verification was empty");
             return false;
         };
 
@@ -108,10 +108,8 @@ async fn callback(mut req: Request<State>) -> tide::Result {
 
             let msg: RawEvent = serde_json::from_slice(&body)?;
 
-            let map = &mut *req.state().lock().await;
-            let (status, secret, tx) = if let Some(x) = map.get(&msg.subscription) {
-                x
-            } else {
+            let e = req.state().get(&msg.subscription);
+            let Some((status, secret, tx)) = e.as_deref() else {
                 return Ok(Response::builder(404).build());
             };
 
@@ -127,7 +125,7 @@ async fn callback(mut req: Request<State>) -> tide::Result {
             match tx.send(msg.event).await {
                 Ok(_) => Ok(Response::builder(200).build()),
                 Err(_) => {
-                    map.remove(&msg.subscription);
+                    req.state().remove(&msg.subscription);
                     Ok(Response::builder(410).build())
                 }
             }
@@ -141,10 +139,8 @@ async fn callback(mut req: Request<State>) -> tide::Result {
 
             let challenge: ChallengeReq = serde_json::from_slice(&body)?;
 
-            let map = &*req.state().lock().await;
-            let (status, secret, _) = if let Some(x) = map.get(&challenge.subscription) {
-                x
-            } else {
+            let e = req.state().get(&challenge.subscription);
+            let Some((status, secret, _)) = e.as_deref() else {
                 return Ok(Response::builder(404).build());
             };
 
@@ -177,12 +173,9 @@ async fn callback(mut req: Request<State>) -> tide::Result {
 
             let rev: RevokeReq = serde_json::from_slice(&body)?;
 
-            let (status, secret, _) =
-                if let Some(x) = (*req.state().lock().await).remove(&rev.subscription.unique) {
-                    x
-                } else {
-                    return Ok(Response::builder(404).build());
-                };
+            let Some((_, (status, secret, _))) = (*req.state()).remove(&rev.subscription.unique) else {
+                return Ok(Response::builder(404).build());
+            };
 
             if !verify_msg(&secret, &req, &body) {
                 return Ok(Response::builder(401).build());
@@ -215,12 +208,15 @@ pub struct EventSub {
 
 impl EventSub {
     pub async fn new(addr: std::net::SocketAddr, v_addr: &url::Url, auth: HelixAuth) -> Self {
-        let state = Arc::new(Mutex::new(HashMap::new()));
+        let state = DashMap::new();
         let mut serve = tide::with_state(state.clone());
         serve.at("/callback").post(callback);
 
-        async_std::task::spawn(async move { serve.listen(addr).await.unwrap() });
-        log::info!("started server at {:?}", addr);
+        async_std::task::Builder::new()
+            .name("callback".to_owned())
+            .spawn(async move { serve.listen(addr).await.unwrap() })
+            .expect("cannot spawn future");
+        log::info!("started server at {addr:?}");
 
         Self {
             map: state,
@@ -238,7 +234,7 @@ impl EventSub {
     pub async fn subscribe<T: SubscriptionType>(
         &self,
         cond: impl Into<T::Cond>,
-    ) -> surf::Result<Subscription<T>> {
+    ) -> Result<Subscription<T>> {
         #[derive(Debug, Serialize)]
         struct CreateSub<'a, T> {
             #[serde(rename = "type")]
@@ -269,6 +265,7 @@ impl EventSub {
         }
 
         let cond = cond.into();
+        let secret = rand::rand_hex(10);
 
         let body = CreateSub {
             name: T::name(),
@@ -276,7 +273,7 @@ impl EventSub {
             condition: cond,
             transport: TransportWithSecret {
                 transport: self.transport(),
-                secret: "8a40a45fb5",
+                secret: &secret,
             },
         };
 
@@ -288,10 +285,9 @@ impl EventSub {
 
         let res: CreateSubRes = self
             .auth
-            .send(surf::post(EVENTSUB_API).body_json(&body).unwrap().build())
-            .await?
-            .body_json()
-            .await?;
+            .send_req_json(surf::post(EVENTSUB_API).body_json(&body).unwrap().build())
+            .await
+            .context("failed to send subscription creation request")?;
 
         let [s] = res.data;
 
@@ -301,66 +297,62 @@ impl EventSub {
             s.status,
             s.condition,
             s.created_at,
-            "8a40a45fb5".into(),
+            secret.clone().into(),
             rx,
         );
 
-        (*self.map.lock().await).insert(sub.get_unique(), (sub._status(), "8a40a45fb5".into(), tx));
+        self.map.insert(sub.get_unique(), (sub._status(), secret.into(), tx));
 
         Ok(sub)
     }
 }
 
-pub async fn get(auth: &HelixAuth) -> surf::Result<Vec<SubInner>> {
+pub async fn get(auth: &HelixAuth) -> Result<Vec<SubInner>> {
     #[derive(Deserialize)]
     struct SubRetDes {
         data: Vec<SubInner>,
     }
 
-    let sub: SubRetDes = auth
-        .send(surf::get(EVENTSUB_API).build())
-        .await?
-        .body_json()
-        .await?;
+    let sub: SubRetDes = auth.send_req_json(surf::get(EVENTSUB_API).build()).await?;
 
     log::debug!("retrieved {} subscriptions", sub.data.len());
 
     Ok(sub.data)
 }
 
-pub async fn delete(auth: &HelixAuth, sub: SubInner) -> surf::Result<()> {
+pub async fn delete(auth: &HelixAuth, sub: SubInner) -> Result<()> {
     #[derive(Serialize)]
     struct Id<'a> {
         id: &'a str,
     }
 
     let mut res = auth
-        .send(
+        .send_req(
             surf::delete(EVENTSUB_API)
-                .query(&Id { id: sub.id() })?
+                .query(&Id { id: sub.id() })
+                .map_err(|e| e.into_inner())?
                 .build(),
         )
         .await?;
-    if res.status().is_success() {
-        Ok(())
-    } else {
-        log::error!(
-            "error while deleting subscription: recieved status {} for subscription {}",
+
+    if !res.status().is_success() {
+        let body = res.body_string().await.map_err(|e| {
+            e.into_inner()
+                .context("error while trying to receive unsuccessful request")
+        })?;
+
+        return Err(anyhow!(
+            "error while deleting subscription {} (status {}): {}",
+            sub.id(),
             res.status(),
-            sub.id()
-        );
-        Err(surf::Error::from_str(
-            res.status(),
-            format!(
-                "failed to delete subscription {}: {:?}",
-                sub.id(),
-                res.body_string().await?
-            ),
-        ))
+            body
+        ));
     }
+
+    Ok(())
 }
 
-pub async fn clean(auth: &HelixAuth) -> surf::Result<()> {
+pub async fn clean(auth: &HelixAuth) -> Result<()> {
     use futures::future::join_all;
 
     log::info!("cleaning all dangling connections...");
@@ -375,7 +367,7 @@ pub async fn clean(auth: &HelixAuth) -> surf::Result<()> {
     Ok(())
 }
 
-pub async fn wipe(auth: &HelixAuth) -> surf::Result<()> {
+pub async fn wipe(auth: &HelixAuth) -> Result<()> {
     use futures::future::join_all;
 
     log::info!("wiping all leftover connections...");

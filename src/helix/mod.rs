@@ -1,11 +1,10 @@
-mod user;
-pub use user::*;
-
-mod stream;
-pub use stream::*;
-
 mod auth;
+mod stream;
+mod user;
+
 pub use auth::*;
+pub use stream::*;
+pub use user::*;
 
 pub struct Helix {
     //user_buf: Vec<UserCredentials>

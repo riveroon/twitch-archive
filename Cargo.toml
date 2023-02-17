@@ -1,6 +1,6 @@
 [package]
 name = "twitch-archive"
-version = "0.8.1-beta+build.74"
+version = "0.8.2-beta+build.75"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,16 +8,17 @@ edition = "2021"
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 async-once-cell = "0.4"
-async-std = { version = "1", features = ["unstable"] }
+async-std = { version = "1", features = ["unstable", "tokio1"] }
 async-tar = "0.4"
 atomic = "0.5"
 chrono = "0.4"
+dashmap = "5"
 futures = "0.3"
 hmac = "0.12"
 log = "0.4"
 log4rs = { path = "../log4rs", default_features = false, features = ["async-std", "console_appender", "file_appender", "pattern_encoder", "threshold_filter"] }
 m3u8-rs = { path = "../m3u8-rs" }
-ngrok = { path = "../ngrok" }
+ngrok = "0.10"
 rand = "0.8"
 sanitize-filename = "0.4"
 serde = "1"
@@ -25,5 +26,6 @@ serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 surf = { version = "2", default_features = false, features = ["h1-client-rustls", "encoding"] }
 tide = "0.16"
+tokio = "1"
 twitchchat = { version = "0.14", features = ["async", "async-std", "async-tls"] }
 url = "2"

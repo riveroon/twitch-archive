@@ -546,17 +546,33 @@ async fn run(argv: Argv) {
         let public_url = &x.parse().expect("provided server address is not valid!");
         archive(auth, argv.server_port, public_url, v).await;
     } else {
-        let tunnel = ngrok::builder()
-            .https()
-            .port(argv.server_port)
-            .run()
-            .await
-            .unwrap();
+        use ngrok::prelude::*;
 
-        let public_url = tunnel.public_url().await.unwrap();
+        let forward_to = format!("localhost:{}", argv.server_port);
+        let public_url = async_std::task::block_on( async {
+            let mut tunnel = ngrok::Session::builder()
+                .authtoken("")
+                .connect()
+                .await
+                .unwrap()
+                .http_endpoint()
+                .forwards_to(&forward_to)
+                .listen()
+                .await
+                .unwrap();
+            
+            let url = tunnel.url().parse().unwrap();
+
+            tokio::spawn( async move {
+                tunnel.forward_tcp(forward_to).await
+            });
+
+            url
+        });
+
         log::info!("ngrok tunnel started at: {public_url}");
 
-        archive(auth, argv.server_port, public_url, v).await;
+        archive(auth, argv.server_port, &public_url, v).await;
     }
 }
 

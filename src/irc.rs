@@ -101,7 +101,7 @@ impl IrcClientBuilder {
                         // I could probably make a macro for this... but I'm laaaaazy :P
                         match msg {
                             x @ (Status::Quit | Status::Eof) => {
-                                log::info!("Received signal {x:?}; shuttind down irc!");
+                                log::info!("Received signal {x:?}");
                                 return Ok(());
                             }
                             Status::Message(Commands::Raw(raw)) => {
@@ -110,9 +110,7 @@ impl IrcClientBuilder {
                             }
                             Status::Message(Commands::ClearChat(x)) => try_send!(map, x),
                             Status::Message(Commands::ClearMsg(x)) => try_send!(map, x),
-                            Status::Message(Commands::HostTarget(x)) => {
-                                try_send!(map, x.source(), x.raw())
-                            }
+                            Status::Message(Commands::HostTarget(x)) => try_send!(map, x.source(), x.raw()),
                             Status::Message(Commands::Join(x)) => try_send!(map, x),
                             Status::Message(Commands::Notice(x)) => try_send!(map, x),
                             Status::Message(Commands::Part(x)) => try_send!(map, x),
@@ -128,21 +126,29 @@ impl IrcClientBuilder {
                 let map = self.map;
                 let mut try_count: u8 = 0;
                 while try_count <= 10 {
-                    if let Ok(mut runner) = _connect().await {
-                        try_count = 0;
+                    match _connect().await {
+                        Ok(mut runner) => {
+                            try_count = 0;
 
-                        for channel in map.keys() {
-                            if let Err(e) = runner.join(&(**channel)[1..]).await {
-                                log::warn!("error while joining channel {channel}: {e:?}");
+                            for channel in map.keys() {
+                                if let Err(e) = runner.join(&(**channel)[1..]).await {
+                                    log::warn!("error while joining channel {channel}: {e:?}");
+                                }
+                            }
+
+                            log::trace!("irc map: {map:?}");
+
+                            if let Err(e) = _handle(runner, &map).await {
+                                log::error!("error while listening to irc: {e:?}");
                             }
                         }
-
-                        log::trace!("irc map: {map:?}");
-
-                        if let Err(e) = _handle(runner, &map).await {
-                            log::error!("error while listening to irc: {e:?}");
-                        } else {
-                            return;
+                        Err(e) => {
+                            if try_count < 10 {
+                                log::warn!("cannot connect to irc; retrying ({try_count}): {e}");
+                            } else {
+                                log::error!("cannot connect to irc; aborting: {e}");
+                                std::process::exit(1);
+                            }
                         }
                     }
 

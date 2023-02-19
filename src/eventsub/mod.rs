@@ -35,7 +35,7 @@ const MSG_VERIFICATION: &str = "webhook_callback_verification";
 const MSG_REVOCATION: &str = "revocation";
 
 type Secret = Box<str>;
-type State = DashMap<SubUnique, (Arc<Atomic<SubStatus>>, Secret, Sender<Box<RawValue>>)>;
+type State = Arc<DashMap<SubUnique, (Arc<Atomic<SubStatus>>, Secret, Sender<Box<RawValue>>)>>;
 
 async fn callback(mut req: Request<State>) -> tide::Result {
     fn err_state(state: SubStatus) -> tide::Result {
@@ -93,10 +93,12 @@ async fn callback(mut req: Request<State>) -> tide::Result {
         mac.verify_slice(&sig).is_ok()
     }
 
+    log::trace!("recieved webhook request: {:?}", req);
     let body = req.body_bytes().await?;
-    log::trace!("recieved webhook request: {:?}", std::str::from_utf8(&body));
-    let Some(msg_type) = req.header(MSG_TYPE)
-        else { return Ok(Response::builder(400).build()) };
+    let Some(msg_type) = req.header(MSG_TYPE) else {
+        log::warn!("received webhook request missing message type!");
+        return Ok(Response::builder(400).build())
+    };
 
     match msg_type.as_str() {
         MSG_NOTIFICATION => {
@@ -110,15 +112,18 @@ async fn callback(mut req: Request<State>) -> tide::Result {
 
             let e = req.state().get(&msg.subscription);
             let Some((status, secret, tx)) = e.as_deref() else {
+                log::warn!("subscription #{} not found", msg.subscription.id());
                 return Ok(Response::builder(404).build());
             };
 
             if !verify_msg(secret, &req, &body) {
+                log::warn!("verification failed!");
                 return Ok(Response::builder(401).build());
             }
 
             let s = status.load(Ordering::Relaxed);
             if s != SubStatus::Enabled {
+                log::warn!("subscription #{} is not enabled: {s:?}", msg.subscription.id());
                 return err_state(s);
             }
 
@@ -141,10 +146,12 @@ async fn callback(mut req: Request<State>) -> tide::Result {
 
             let e = req.state().get(&challenge.subscription);
             let Some((status, secret, _)) = e.as_deref() else {
+                log::warn!("subscription #{} not found", challenge.subscription.id());
                 return Ok(Response::builder(404).build());
             };
 
             if !verify_msg(secret, &req, &body) {
+                log::warn!("verification failed!");
                 return Ok(Response::builder(401).build());
             }
 
@@ -155,7 +162,10 @@ async fn callback(mut req: Request<State>) -> tide::Result {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => Ok(Response::builder(200).body(challenge.challenge).build()),
-                Err(state) => err_state(state),
+                Err(state) => {
+                    log::warn!("verification request on subscription of state {state:?}");
+                    err_state(state)
+                }
             }
         }
         MSG_REVOCATION => {
@@ -174,17 +184,22 @@ async fn callback(mut req: Request<State>) -> tide::Result {
             let rev: RevokeReq = serde_json::from_slice(&body)?;
 
             let Some((_, (status, secret, _))) = (*req.state()).remove(&rev.subscription.unique) else {
+                log::warn!("subscription #{} not found", rev.subscription.unique.id());
                 return Ok(Response::builder(404).build());
             };
 
             if !verify_msg(&secret, &req, &body) {
+                log::warn!("verification failed!");
                 return Ok(Response::builder(401).build());
             }
 
             status.swap(rev.subscription.status, Ordering::Relaxed);
             Ok(Response::builder(200).build())
         }
-        _ => Ok(Response::builder(400).build()),
+        unknown => {
+            log::warn!("received webhook request has unknown message type: {unknown}");
+            Ok(Response::builder(400).build())
+        }
     }
 }
 
@@ -207,9 +222,9 @@ pub struct EventSub {
 }
 
 impl EventSub {
-    pub async fn new(addr: std::net::SocketAddr, v_addr: &url::Url, auth: HelixAuth) -> Self {
-        let state = DashMap::new();
-        let mut serve = tide::with_state(state.clone());
+    pub fn new(addr: std::net::SocketAddr, v_addr: &url::Url, auth: HelixAuth) -> Self {
+        let state = Arc::new(DashMap::new());
+        let mut serve = tide::with_state(Arc::clone(&state));
         serve.at("/callback").post(callback);
 
         async_std::task::Builder::new()

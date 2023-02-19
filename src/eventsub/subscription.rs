@@ -6,7 +6,7 @@ use std::{marker::PhantomData, sync::Arc};
 use super::SubscriptionType;
 use crate::prelude::*;
 
-#[derive(Clone, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub struct SubUnique {
     id: Box<str>,
 }

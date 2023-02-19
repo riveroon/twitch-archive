@@ -27,6 +27,7 @@ mod irc;
 mod logger;
 mod prelude;
 mod rand;
+mod tar;
 
 const CHAT_BUFFER: usize = 16384;
 const RAND_DIR_LEN: usize = 12;
@@ -195,7 +196,7 @@ async fn cmd(program: &str, args: &[&str], output: bool) -> Result<Option<String
         }
     };
 
-    let (logpath, mut file) = fs_utils::create_dedup_file(path::Path::new(&format!(
+    let (logpath, file) = fs_utils::create_dedup_file(path::Path::new(&format!(
         "{}.{}.log",
         task::current().name().unwrap_or("<unknown>"),
         san(program)
@@ -208,7 +209,12 @@ async fn cmd(program: &str, args: &[&str], output: bool) -> Result<Option<String
         logpath.display()
     );
 
-    file.write_all(&out.stderr).await?;
+    let mut writer = futures::io::BufWriter::new(file);
+
+    writer.write_all("=== STDOUT ===\n".as_bytes()).await?;
+    writer.write_all(&out.stdout).await?;
+    writer.write_all("\n\n=== STDERR ===\n".as_bytes()).await?;
+    writer.write_all(&out.stderr).await?;
     Err(anyhow!("program exited abnormally!"))
 }
 
@@ -469,11 +475,10 @@ async fn archive(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         public_url,
         auth.clone(),
-    )
-    .await;
-
+    );
     let shared = Arc::new(events);
 
+    async_std::task::yield_now().await;
     join_all(channels.into_iter().map(|(user, rx, settings)| {
         task::Builder::new()
             .name(format!("user-{}", user.id()))
@@ -542,16 +547,33 @@ async fn run(argv: Argv) {
         .await
         .expect("error while wiping leftover subscriptions");
 
-    if let Some(x) = argv.server_addr {
-        let public_url = &x.parse().expect("provided server address is not valid!");
-        archive(auth, argv.server_port, public_url, v).await;
-    } else {
-        use ngrok::prelude::*;
+    match argv.tunnel {
+        Tunnel::Provided(addr) => {
+            let public_url = addr.parse().expect("provided server address is not valid!");
+            archive(auth, argv.server_port, &public_url, v).await;
+        }
+        Tunnel::Wrapper => {
+            let tunnel = ngrok::builder()
+                .https()
+                .port(argv.server_port)
+                .run()
+                .await
+                .unwrap();
 
-        let forward_to = format!("localhost:{}", argv.server_port);
-        let public_url = async_std::task::block_on( async {
+            let public_url = tunnel.public_url().await.unwrap();
+            log::info!("ngrok tunnel started at: {public_url}");
+
+            archive(auth, argv.server_port, public_url, v).await;
+        }
+        // Using ngrok-rs failed b/c a tunnel established with ngrok-rs
+        // doesn't return the response for the first unknown requests
+        /*
+        Tunnel::Run(auth) => {
+            use ngrok::prelude::*;
+
+            let forward_to = format!("localhost:{}", argv.server_port);
             let mut tunnel = ngrok::Session::builder()
-                .authtoken("")
+                .authtoken(auth)
                 .connect()
                 .await
                 .unwrap()
@@ -560,23 +582,25 @@ async fn run(argv: Argv) {
                 .listen()
                 .await
                 .unwrap();
-            
-            let url = tunnel.url().parse().unwrap();
 
-            tokio::spawn( async move {
+            let public_url = tunnel.url().parse().unwrap();
+
+            async_std::task::spawn( async move {
+                log::info!("servicing tunnel");
                 tunnel.forward_tcp(forward_to).await
             });
+            async_std::task::yield_now().await;
 
-            url
-        });
-
-        log::info!("ngrok tunnel started at: {public_url}");
-
-        archive(auth, argv.server_port, &public_url, v).await;
-    }
+            log::info!("ngrok tunnel started at: {public_url}");
+            public_url
+            
+        }
+        */
+    };
+    log::info!("shutting down...");
 }
 
 fn main() {
     let argv = parse_args();
-    futures::executor::block_on(run(argv));
+    async_std::task::block_on(run(argv));
 }

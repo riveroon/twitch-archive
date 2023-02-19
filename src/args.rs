@@ -6,15 +6,21 @@ use crate::{filename::Formatter, prelude::*};
 static NAME: OnceCell<Box<str>> = OnceCell::new();
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub enum Tunnel {
+    Provided(String),
+    Wrapper
+    //Run(String)
+}
+
 pub struct Argv {
     pub client_id: String,
     pub client_secret: String,
+    pub tunnel: Tunnel,
     pub fmt: Formatter,
     pub log_output: String,
     pub log_level: log::LevelFilter,
     pub log_stderr: bool,
     pub server_port: u16,
-    pub server_addr: Option<String>,
     pub save_to_dir: bool,
     pub twitch_auth_header: Option<String>,
     pub channels: Vec<(UserCredentials, ChannelSettings)>,
@@ -68,7 +74,7 @@ fn help() -> String {
             \n  -S, --client-secret  <str>  The client authorization secret .\
             \n  -f, --file-name      <str>  Formats the output file name.\
             \n                              See below for more information.\
-            \n                              (Default: \"%Sl\\[%si] %st\")\
+            \n                              (Default: \"%Sl/[%si] %st\")\
             \n  --log-output         <path> Write log output to file.\
             \n                              When empty, does not log to file.\
             \n                              (Default: `archive.log`)
@@ -157,7 +163,8 @@ pub fn parse_args() -> Argv {
 
     let mut client_id = None;
     let mut client_secret = None;
-    let mut file_name = "%Sl\\[%si] %st".to_owned();
+//    let mut ngrok_authtoken = None;
+    let mut file_name = "%Sl/[%si] %st".to_owned();
     let mut log_output = "archive.log".to_owned();
     let mut log_level = log::LevelFilter::Info;
     let mut log_stderr = false;
@@ -185,6 +192,14 @@ pub fn parse_args() -> Argv {
                     std::process::exit(1);
                 }
             }
+//            "-N" | "--ngrok-authtoken" => {
+//                ngrok_authtoken = if let Some(x) = argv.next() {
+//                    Some(x)
+//                } else {
+//                    type_err("str", &x);
+//                    std::process::exit(1);
+//                }
+//            }
             "--log-output" => {
                 log_output = if let Some(x) = argv.next() {
                     x
@@ -266,6 +281,18 @@ pub fn parse_args() -> Argv {
         eprint_err("client-secret missing!");
         std::process::exit(1);
     };
+//    let tunnel = match (server_addr, ngrok_authtoken) {
+//        (Some(addr), _) => Tunnel::Provided(addr),
+//        (None, Some(auth)) => Tunnel::Run(auth),
+//        (None, None) => {
+//            eprint_err("ngrok-authtoken missing!");
+//            std::process::exit(1);
+//        }
+//    };
+    let tunnel = match server_addr {
+        Some(addr) => Tunnel::Provided(addr),
+        None => Tunnel::Wrapper
+    };
     if file_name.is_empty() {
         eprint_err("File names cannot be an empty string!");
         std::process::exit(1);
@@ -293,11 +320,11 @@ pub fn parse_args() -> Argv {
     Argv {
         client_id,
         client_secret,
+        tunnel,
         log_output,
         log_level,
         log_stderr,
         server_port,
-        server_addr,
         fmt: Formatter::new(&file_name),
         save_to_dir,
         twitch_auth_header,

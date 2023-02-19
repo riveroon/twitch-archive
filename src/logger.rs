@@ -23,7 +23,7 @@ pub fn init(file: String, level: LevelFilter, stderr: bool) -> Handle {
                 Target::Stdout
             })
             .encoder(Box::new(PatternEncoder::new(
-                "{d(%Y-%m-%d %H:%M:%S %Z)} [ {h({l}):5.5} ] {T}: {M} > {m}{n}",
+                "{d(%Y-%m-%d %H:%M:%S %Z)(local)} [ {h({l}):5.5} ] {T}: {M} > {m}{n}",
             )))
             .build();
         let filter = ThresholdFilter::new(level);
@@ -44,7 +44,7 @@ pub fn init(file: String, level: LevelFilter, stderr: bool) -> Handle {
                 Target::Stdout
             })
             .encoder(Box::new(PatternEncoder::new(
-                "{d(%Y-%m-%d %H:%M:%S %Z)} [ {h({l}):5.5} ] {T}: {M} > {m}{n}",
+                "{d(%Y-%m-%d %H:%M:%S %Z)(local)} [ {h({l}):5.5} ] {T}: {M} > {m}{n}",
             )))
             .build();
         let filter = ThresholdFilter::new(LevelFilter::Warn);
@@ -61,7 +61,7 @@ pub fn init(file: String, level: LevelFilter, stderr: bool) -> Handle {
         let file = FileAppender::builder()
             .append(true)
             .encoder(Box::new(PatternEncoder::new(
-                "{d(%Y-%m-%d %H:%M:%S %Z)} [ {({l}):5.5} ] {T}: {M}:{L}> {m}{n}",
+                "{d(%Y-%m-%d %H:%M:%S %Z)(local)} [ {({l}):5.5} ] {T}: {M}:{L}> {m}{n}",
             )))
             .build(file)
             .unwrap();

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context};
 use async_once_cell::OnceCell;
+use async_recursion::async_recursion;
 use async_std::{
     fs,
     io::{self, WriteExt},
@@ -24,17 +25,19 @@ mod fs_utils;
 mod helix;
 mod hls;
 mod irc;
+mod live;
 mod logger;
 mod prelude;
 mod rand;
-mod tar;
+//mod tar;
 
 const CHAT_BUFFER: usize = 16384;
 const RAND_DIR_LEN: usize = 12;
-const ASYNC_BUF_FACTOR: usize = 8;
+const ASYNC_BUF_FACTOR: usize = 64;
 
 static FORMATTER: OnceCell<(filename::Formatter, bool)> = OnceCell::new();
 static TW_STREAM_AUTH: OnceCell<Box<str>> = OnceCell::new();
+static EXTRACTOR: OnceCell<Extractor> = OnceCell::new();
 
 async fn datafile(
     path: &path::Path,
@@ -215,7 +218,20 @@ async fn cmd(program: &str, args: &[&str], output: bool) -> Result<Option<String
     writer.write_all(&out.stdout).await?;
     writer.write_all("\n\n=== STDERR ===\n".as_bytes()).await?;
     writer.write_all(&out.stderr).await?;
+    writer.flush().await?;
     Err(anyhow!("program exited abnormally!"))
+}
+
+async fn streamlink(login: impl AsRef<str>) -> Result<Option<String>> {
+    let link = format!("https://twitch.tv/{}", login.as_ref());
+    let mut args = vec!["--stream-url", &link];
+
+    if let Some(x) = TW_STREAM_AUTH.get() {
+        args.insert(0, "--twitch-api-header");
+        args.insert(1, x);
+    }
+
+    cmd("streamlink", &args, true).await
 }
 
 async fn download(stream: Stream, chat: IrcRecv, chn: ChannelSettings) -> Result<()> {
@@ -226,20 +242,26 @@ async fn download(stream: Stream, chat: IrcRecv, chn: ChannelSettings) -> Result
     ) -> Result<Option<hls::StreamData>> {
         log::debug!("download location: {}", path.display());
 
-        let link = format!("https://twitch.tv/{}", stream.user().login());
-        let mut args = vec!["--stream-url", &link];
+        let mut n = 0;
+        let url = loop {
+            n += 1;
+            let url = match EXTRACTOR.get().unwrap() {
+                Extractor::Internal => live::get_hls(stream.user().login(), TW_STREAM_AUTH.get().map(AsRef::as_ref)).await,
+                Extractor::Streamlink => streamlink(stream.user().login()).await
+            }.context("failed to fetch hls playlist url")?;
 
-        if let Some(x) = TW_STREAM_AUTH.get() {
-            args.insert(0, "--twitch-api-header");
-            args.insert(1, x);
-        }
+            if let Some(x) = url {
+                break x;
+            }
 
-        let url = cmd("streamlink", &args, true)
-            .await
-            .context("failed to fetch hls playlist url")?
-            .unwrap();
+            async_std::task::sleep(time::Duration::from_secs(5)).await;
+            if n >= 4 {
+                log::error!("could not find m3u8 url!");
+                return Err(anyhow!("could not find m3u8 url!"));
+            }
+        };
 
-        hls::download(url, &path, format.split(',').map(|x| x.trim()))
+        hls::download(url, &path, format.split(',').map(str::trim))
             .await
             .context("failed to download hls playlist")
     }
@@ -282,36 +304,75 @@ async fn download(stream: Stream, chat: IrcRecv, chn: ChannelSettings) -> Result
     }
 
     async fn tar(tarpath: &path::Path, path: &path::Path) -> Result<Box<path::Path>> {
+        use async_tar::Builder;
+        #[async_recursion]
+        async fn put_recursive(
+            builder: &mut Builder<fs::File>,
+            path: &path::Path,
+            base: &path::Path,
+            uc: &path::Path
+        ) -> Result<()> {
+            use fs::{DirEntry, FileType};
+
+            async fn entry_check(entry: io::Result<DirEntry>, uc: &path::Path) -> Result<(FileType, DirEntry)> {
+                let entry = entry?;
+                let canon = entry.path()
+                    .canonicalize()
+                    .await?;
+
+                if !canon.starts_with(uc) {
+                    panic!(
+                        "reached unpexpected location while creating tar: {}, bound: {}",
+                        canon.display(),
+                        uc.display()
+                    );
+                }
+
+                let file_type = entry.file_type().await?;
+                Ok((file_type, entry))
+            }
+
+            let mut dir_entry = fs::read_dir(&path)
+                .await?
+                .map(|entry| entry_check(entry, uc))
+                .buffer_unordered(ASYNC_BUF_FACTOR);
+
+            while let Some(x) = dir_entry.next().await {
+                let (file_type, entry) = x?;
+
+                if file_type.is_dir() {
+                    log::trace!(
+                        "appending directory {}: {}",
+                        entry.path().display(),
+                        entry.file_name().to_string_lossy()
+                    );
+                    builder.append_dir(base.join(entry.file_name()), &entry.path()).await?;
+
+                    put_recursive(builder, &entry.path(), &base.join(entry.file_name()), uc).await?;
+                    let _ = fs::remove_dir(entry.path()).await;
+                } else if file_type.is_file() {
+                    log::trace!(
+                        "appending file {}: {}",
+                        entry.path().display(),
+                        entry.file_name().to_string_lossy()
+                    );
+                    builder.append_path_with_name(&entry.path(), base.join(entry.file_name()))
+                        .await?;
+                    let _ = fs::remove_file(entry.path()).await;
+                } else {
+                    log::warn!("file {} was not a file or a directory", entry.path().display())
+                }
+            }
+
+            Ok(())
+        }
+
         let (tarpath, tarfile) = fs_utils::create_dedup_file(tarpath).await?;
         let mut tar = async_tar::Builder::new(tarfile);
+        let canon = path.canonicalize().await?;
+        
+        put_recursive(&mut tar, path, path::Path::new(""), &canon).await?;
 
-        let mut dir_entry = fs::read_dir(&path)
-            .await?
-            .map(|entry| async move {
-                let entry = entry?;
-                return io::Result::Ok((entry.path().is_dir().await, entry));
-            })
-            .buffer_unordered(ASYNC_BUF_FACTOR);
-
-        while let Some(x) = dir_entry.next().await {
-            let (is_dir, entry) = x?;
-            if is_dir {
-                log::trace!(
-                    "appending directory {}: {}",
-                    entry.path().display(),
-                    entry.file_name().to_string_lossy()
-                );
-                tar.append_dir_all(entry.file_name(), &entry.path()).await?;
-            } else {
-                log::trace!(
-                    "appending file {}: {}",
-                    entry.path().display(),
-                    entry.file_name().to_string_lossy()
-                );
-                tar.append_path_with_name(&entry.path(), entry.file_name())
-                    .await?;
-            };
-        }
         tar.finish().await?;
         fs::remove_dir_all(path).await?;
 
@@ -425,6 +486,9 @@ async fn listen(
                             // Therefore, the current (temporary) solution is to poll the api until it returns something.
                             // This will change in the future since retrieving and downloading the stream works regardless of
                             // this api returning nothing.
+                            // An alternative (better!) fix is to use the Get Channel Information
+                            // (https://dev.twitch.tv/docs/api/reference/#get-channel-information) to fill out the missing values
+                            // and use that instead.
                             // The current wait limit is set to 2 minutes, which seems to be about the timepoint when the api
                             // reliabely returns something.
                             log::warn!("streams matching criteria not found; expected stream #{} ({count})", msg.id());
@@ -511,6 +575,10 @@ async fn run(argv: Argv) {
 
     FORMATTER
         .get_or_init(async { (argv.fmt, argv.save_to_dir) })
+        .await;
+
+    EXTRACTOR
+        .get_or_init(async{ argv.use_extractor })
         .await;
 
     let mut irc = irc::IrcClientBuilder::new();

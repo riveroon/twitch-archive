@@ -6,6 +6,11 @@ use crate::{filename::Formatter, prelude::*};
 static NAME: OnceCell<Box<str>> = OnceCell::new();
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub enum Extractor {
+    Internal,
+    Streamlink
+}
+
 pub enum Tunnel {
     Provided(String),
     Wrapper
@@ -22,6 +27,7 @@ pub struct Argv {
     pub log_stderr: bool,
     pub server_port: u16,
     pub save_to_dir: bool,
+    pub use_extractor: Extractor,
     pub twitch_auth_header: Option<String>,
     pub channels: Vec<(UserCredentials, ChannelSettings)>,
 }
@@ -93,6 +99,9 @@ fn help() -> String {
             \n                              (Default: `subscriptions.json`)\
             \n  --save-to-dir               Save the output to a directory.\
             \n                              If not set, downloads will be archived to a .tar file.\
+            \n  --use-extractor      <str>  Uses the given extractor for extracting m3u8 playlists.\
+            \n                              Valid values are:\
+            \n                                `internal`, `streamlink`\
             \n  --twitch-auth-header <str>  Authentication header to pass to streamlink for\
             \n                              acquiring stream access tokens.\
             \n                              (Default: \"\")\
@@ -172,6 +181,7 @@ pub fn parse_args() -> Argv {
     let mut server_addr = None;
     let mut sub_data = "subscriptions.json".to_owned();
     let mut save_to_dir = false;
+    let mut use_extractor = "internal".to_string();
     let mut twitch_auth_header = None;
 
     while let Some(x) = argv.next() {
@@ -250,6 +260,14 @@ pub fn parse_args() -> Argv {
                 }
             }
             "--save-to-dir" => save_to_dir = true,
+            "--use-extractor" => {
+                use_extractor = if let Some(x) = argv.next() {
+                    x
+                } else {
+                    type_err("str", &x);
+                    std::process::exit(1);
+                }
+            }
             "--twitch-auth-header" => {
                 twitch_auth_header = if let Some(x) = argv.next() {
                     Some(x)
@@ -304,6 +322,14 @@ pub fn parse_args() -> Argv {
             std::process::exit(2);
         }
     };
+    let use_extractor = match use_extractor.to_lowercase().as_str() {
+        "internal" => Extractor::Internal,
+        "streamlink" => Extractor::Streamlink,
+        x => {
+            eprint_err(&format!("unexpected value for `--use_extractor`: {x}"));
+            std::process::exit(1);
+        }
+    };
 
     #[derive(Deserialize)]
     struct ChannelDes {
@@ -327,6 +353,7 @@ pub fn parse_args() -> Argv {
         server_port,
         fmt: Formatter::new(&file_name),
         save_to_dir,
+        use_extractor,
         twitch_auth_header,
         channels: channels
             .into_iter()

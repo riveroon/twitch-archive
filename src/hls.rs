@@ -15,7 +15,7 @@ pub type StreamData = (path::PathBuf, AlternativeMedia, Option<VariantStream>);
 pub async fn download(
     uri: impl AsRef<str>,
     dest: &path::Path,
-    format: impl Iterator<Item = &str>,
+    format: impl Iterator<Item = &str>
 ) -> Result<Option<StreamData>> {
     let client: surf::Client = surf::Config::new()
         .set_timeout(Some(time::Duration::from_secs(15)))

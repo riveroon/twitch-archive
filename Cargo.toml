@@ -1,6 +1,6 @@
 [package]
 name = "twitch-archive"
-version = "0.8.2-beta+build.88"
+version = "0.8.2-beta+build.96"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 async-once-cell = "0.4"
+async-recursion = "1"
 async-std = { version = "1", features = ["unstable"] }
 async-tar = "0.4"
 atomic = "0.5"

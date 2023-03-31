@@ -15,7 +15,7 @@ pub fn san(value: &str) -> String {
 }
 
 pub async fn create_new_file(path: &path::Path) -> io::Result<Option<fs::File>> {
-    log::trace!("download::create_new_file: {}", path.to_string_lossy());
+    log::trace!("download::create_new_file: {}", path.display());
 
     let file = fs::OpenOptions::new()
         .write(true)
@@ -33,7 +33,7 @@ pub async fn create_new_file(path: &path::Path) -> io::Result<Option<fs::File>> 
 }
 
 pub async fn create_dedup_file(path: &path::Path) -> io::Result<(Box<path::Path>, fs::File)> {
-    log::trace!("download::create_dedup_file: {}", path.to_string_lossy());
+    log::trace!("download::create_dedup_file: {}", path.display());
 
     // fs::create_dir_all() does not error on duplicate paths; see async_std issue #1051
     if let Some(x) = path.parent() {
@@ -58,7 +58,7 @@ pub async fn create_dedup_file(path: &path::Path) -> io::Result<(Box<path::Path>
 }
 
 pub async fn create_new_dir(path: &path::Path) -> io::Result<bool> {
-    log::trace!("download::create_new_dir: {}", path.to_string_lossy());
+    log::trace!("download::create_new_dir: {}", path.display());
 
     if let Some(x) = path.parent() {
         if !x.is_dir().await {
@@ -77,7 +77,7 @@ pub async fn create_new_dir(path: &path::Path) -> io::Result<bool> {
 }
 
 pub async fn create_dedup_dir(path: &path::Path) -> io::Result<Box<path::Path>> {
-    log::trace!("download::create_dedup_dir: {}", path.to_string_lossy());
+    log::trace!("download::create_dedup_dir: {}", path.display());
 
     if create_new_dir(path).await? {
         return Ok(path.into());

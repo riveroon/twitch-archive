@@ -29,6 +29,7 @@ mod live;
 mod logger;
 mod prelude;
 mod rand;
+mod retry;
 //mod tar;
 
 const CHAT_BUFFER: usize = 16384;

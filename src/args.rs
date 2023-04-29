@@ -1,4 +1,4 @@
-use async_once_cell::OnceCell;
+use once_cell::sync::OnceCell;
 use std::{env, fs};
 
 use crate::{filename::Formatter, prelude::*};
@@ -168,7 +168,7 @@ pub fn parse_args() -> Argv {
     let mut argv = env::args();
 
     let name = argv.next().unwrap();
-    futures::executor::block_on(NAME.get_or_init(async { name.into() }));
+    NAME.set(name.into()).unwrap();
 
     let mut client_id = None;
     let mut client_secret = None;

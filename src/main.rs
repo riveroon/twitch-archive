@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context};
-use async_once_cell::OnceCell;
+use once_cell::sync::OnceCell;
 use async_recursion::async_recursion;
 use async_std::{
     fs,
@@ -573,13 +573,9 @@ async fn run(argv: Argv) {
         }
     };
 
-    FORMATTER
-        .get_or_init(async { (argv.fmt, argv.save_to_dir) })
-        .await;
+    FORMATTER.set((argv.fmt, argv.save_to_dir));
 
-    EXTRACTOR
-        .get_or_init(async{ argv.use_extractor })
-        .await;
+    EXTRACTOR.set(argv.use_extractor);
 
     let mut irc = irc::IrcClientBuilder::new();
     let mut v: Vec<(User, IrcRecv, ChannelSettings)> = Vec::new();
@@ -608,7 +604,7 @@ async fn run(argv: Argv) {
     irc.build();
 
     if let Some(x) = argv.twitch_auth_header {
-        TW_STREAM_AUTH.get_or_init(async { x.into() }).await;
+        TW_STREAM_AUTH.set(x.into());
     }
 
     eventsub::wipe(&auth)

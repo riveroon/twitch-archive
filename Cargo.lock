@@ -205,9 +205,9 @@ dependencies = [
 
 [[package]]
 name = "async-once-cell"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f61305cacf1d0c5c9d3ee283d22f8f1f8c743a18ceb44a1b102bd53476c141de"
+checksum = "5b49bd4c5b769125ea6323601c39815848972880efd33ffb2d01f9f909adc699"
 
 [[package]]
 name = "async-process"
@@ -225,6 +225,17 @@ dependencies = [
  "libc",
  "signal-hook",
  "windows-sys",
+]
+
+[[package]]
+name = "async-recursion"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b015a331cc64ebd1774ba119538573603427eaace0a1950c423ab971f903796"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1371,9 +1382,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.16.0"
+version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f0b0d4bf799edbc74508c1e8bf170ff5f41238e5f8225603ca7caaae2b7860"
+checksum = "b7e5500299e16ebb147ae15a00a942af264cf3688f47923b8fc2cd5858f23ad3"
 
 [[package]]
 name = "opaque-debug"
@@ -2121,10 +2132,11 @@ dependencies = [
 
 [[package]]
 name = "twitch-archive"
-version = "0.8.2-beta+build.88"
+version = "0.8.3-beta+build.110"
 dependencies = [
  "anyhow",
  "async-once-cell",
+ "async-recursion",
  "async-std",
  "async-tar",
  "atomic",
@@ -2136,6 +2148,7 @@ dependencies = [
  "log4rs",
  "m3u8-rs",
  "ngrok",
+ "once_cell",
  "rand 0.8.5",
  "sanitize-filename",
  "serde",

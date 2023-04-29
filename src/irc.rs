@@ -152,7 +152,7 @@ impl IrcClientBuilder {
                         }
                     }
 
-                    async_std::task::sleep(Duration::from_secs(60)).await;
+                    async_std::task::sleep(Duration::from_secs(10)).await;
                     try_count += 1;
                     continue;
                 }

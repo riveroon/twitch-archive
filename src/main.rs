@@ -574,9 +574,9 @@ async fn run(argv: Argv) {
         }
     };
 
-    FORMATTER.set((argv.fmt, argv.save_to_dir));
+    FORMATTER.set((argv.fmt, argv.save_to_dir)).unwrap();
 
-    EXTRACTOR.set(argv.use_extractor);
+    EXTRACTOR.set(argv.use_extractor).unwrap();
 
     let mut irc = irc::IrcClientBuilder::new();
     let mut v: Vec<(User, IrcRecv, ChannelSettings)> = Vec::new();
@@ -605,7 +605,7 @@ async fn run(argv: Argv) {
     irc.build();
 
     if let Some(x) = argv.twitch_auth_header {
-        TW_STREAM_AUTH.set(x.into());
+        TW_STREAM_AUTH.set(x.into()).unwrap();
     }
 
     eventsub::wipe(&auth)

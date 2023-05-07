@@ -6,6 +6,7 @@ use crate::{filename::Formatter, prelude::*};
 static NAME: OnceCell<Box<str>> = OnceCell::new();
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[derive(Debug)]
 pub enum Extractor {
     Internal,
     Streamlink

@@ -5,6 +5,7 @@ use crate::helix::*;
 use chrono::{Datelike, Timelike};
 use sanitize_filename::Options;
 
+#[derive(Debug)]
 enum Elements {
     UserId,
     UserLogin,
@@ -23,6 +24,7 @@ enum Elements {
     String(Box<str>),
 }
 
+#[derive(Debug)]
 pub struct Formatter {
     inner: Box<[Elements]>,
 }

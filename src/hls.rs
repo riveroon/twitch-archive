@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
 use async_std::{
-    fs, io::{self, BufWriter, WriteExt}, path, task,
+    fs, io::{self, BufWriter, WriteExt}, path, task, 
 };
 use futures::{SinkExt, AsyncWrite, Stream, io::AllowStdIo, StreamExt, future};
 use m3u8_rs::{AlternativeMedia, AlternativeMediaType, VariantStream, MediaPlaylist, MediaPlaylistType, MediaSegment};
@@ -147,7 +147,9 @@ pub async fn spawn_downloader<W> (uri: Url) -> Result<(MediaPlaylistWriter<W>, i
                 let mut list = media.segments;
 
                 if list.is_empty() {
-                    task::sleep(next_poll - time::Instant::now()).await;
+                    let sleep = next_poll - time::Instant::now();
+                    log::debug!("received empty playlist; trying again in {:?}", sleep);
+                    task::sleep(sleep).await;
                     continue;
                 }
 
@@ -178,7 +180,9 @@ pub async fn spawn_downloader<W> (uri: Url) -> Result<(MediaPlaylistWriter<W>, i
                     break;
                 }
 
-                task::sleep(next_poll - time::Instant::now()).await;
+                let sleep = next_poll - time::Instant::now();
+                log::trace!("sleeping for {:?}", sleep);
+                task::sleep(sleep).await;
             }
 
             Result::<()>::Ok(())
@@ -210,35 +214,52 @@ pub async fn download_media(
     let (mut mw, rx) = spawn_downloader((*uri).clone()).await?;
     mw.init(mediafile).await?;
 
-    let mut segments = rx.skip_while(|s| 
-            future::ready( if let Some(x) = &s.title { x.starts_with("Amazon") } else { false } )
-        )
-        .enumerate()
-        .map(|(i, mut s)| {
-            let uri = Arc::clone(&uri);
-            async move {
-                let uri = (*uri).join(&s.uri)?;
-                let res = get(uri, &format!("request for media segment #{i}")).await?;
+    let mut segments = {
+        let s = rx
+            .skip_while(|s| 
+                future::ready( if let Some(x) = &s.title { x.starts_with("Amazon") } else { false } )
+            )
+            .enumerate()
+            .map(|(i, mut s)| {
+                let uri = Arc::clone(&uri);
+                async move {
+                    let uri = (*uri).join(&s.uri)?;
+                    let res = get(uri, &format!("request for media segment #{i}")).await?;
 
-                s.uri = format!("{stream_name}/{i:05}.ts");
-                let path = dest.join(&s.uri);
-                let mut file = fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&path)
-                    .await
-                    .context("failed to create segment file")?;
+                    s.uri = format!("{stream_name}/{i:05}.ts");
+                    let path = dest.join(&s.uri);
+                    let mut file = fs::OpenOptions::new()
+                        .create_new(true)
+                        .write(true)
+                        .open(&path)
+                        .await
+                        .context("failed to create segment file")?;
 
-                io::copy(res, &mut file)
-                    .await
-                    .context("failed to write segment to file")?;
+                    io::copy(res, &mut file)
+                        .await
+                        .context("failed to write segment to file")?;
 
-                file.sync_all().await.context("failed to flush segment")?;
+                    file.sync_all().await.context("failed to flush segment")?;
 
-                Result::<MediaSegment>::Ok(s)
-            }
-        })
-        .buffered(6);
+                    Result::<MediaSegment>::Ok(s)
+                }
+            })
+            .buffered(6);
+            
+        async_std::stream::StreamExt::timeout(s, time::Duration::from_secs(300))
+            .take_while(|r| {
+                let p = match r {
+                    Ok(_) => true,
+                    Err(e) => {
+                        log::error!("timeout while receiving media segments from worker: {:?}", e);
+                        false
+                    }
+                };
+
+                future::ready(p)
+            })
+            .map(Result::unwrap)
+    };
 
     while let Some(s) = segments.next().await {
         mw.write_segment(s?).await?;

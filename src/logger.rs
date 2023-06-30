@@ -2,7 +2,14 @@ use ::log::LevelFilter;
 use log4rs::{
     append::{
         console::{ConsoleAppender, Target},
-        file::FileAppender,
+        rolling_file::{
+            policy::compound::{
+                CompoundPolicy,
+                roll::fixed_window::FixedWindowRoller,
+                trigger::size::SizeTrigger,
+            },
+            RollingFileAppender,
+        },
     },
     config::{Appender, Config, Logger, Root},
     encode::pattern::PatternEncoder,
@@ -58,12 +65,20 @@ pub fn init(file: String, level: LevelFilter, stderr: bool) -> Handle {
     }
 
     if !file.is_empty() {
-        let file = FileAppender::builder()
+        let roll = FixedWindowRoller::builder()
+            .build(&format!("{}_{{}}.gz", file.rsplit_once('.').unwrap().0), 8)
+            .unwrap();
+
+        let trigger = SizeTrigger::new(1073741824);
+
+        let policy = CompoundPolicy::new(Box::new(trigger), Box::new(roll));
+
+        let file = RollingFileAppender::builder()
             .append(true)
             .encoder(Box::new(PatternEncoder::new(
                 "{d(%Y-%m-%d %H:%M:%S %Z)(local)} [ {({l}):5.5} ] {T}: {M}:{L}> {m}{n}",
             )))
-            .build(file)
+            .build(&file, Box::new(policy))
             .unwrap();
 
         config = config.appender(Appender::builder().build("file", Box::new(file)));
@@ -73,7 +88,7 @@ pub fn init(file: String, level: LevelFilter, stderr: bool) -> Handle {
 
     let config = config
         .logger(main.build("twitch_archive", LevelFilter::Trace))
-        .build(root.build(LevelFilter::Debug))
+        .build(root.build(LevelFilter::Trace))
         .unwrap();
 
     log4rs::init_config(config).unwrap()

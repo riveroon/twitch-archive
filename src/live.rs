@@ -96,10 +96,11 @@ async fn parse_res(login: &str, mut res: surf::Response) -> surf::Result<Option<
 
 pub async fn get_hls(login: impl AsRef<str>, auth: Option<&str>) -> anyhow::Result<Option<String>> {
     let login = login.as_ref();
-    let res = send_req(login, auth).await
+    let mut res = send_req(login, auth).await
         .map_err(surf::Error::into_inner)?;
 
     if !res.status().is_success() {
+        log::debug!("hls endpoint returned status {}; {}", res.status(), res.body_string().await.unwrap_or_default());
         return Ok(None);
     }
 

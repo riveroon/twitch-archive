@@ -27,6 +27,7 @@ mod hls;
 mod irc;
 mod live;
 mod logger;
+mod poll_dbg;
 mod prelude;
 mod rand;
 mod retry;

@@ -6,7 +6,7 @@ use serde_json::value::RawValue;
 use tide::{Request, Response};
 
 use super::HelixAuth;
-use crate::{prelude::*, rand};
+use crate::{prelude::*, rand, eventsub::event::Version};
 
 use event::SubscriptionType;
 pub use subscription::*;
@@ -254,7 +254,7 @@ impl EventSub {
         struct CreateSub<'a, T> {
             #[serde(rename = "type")]
             name: &'static str,
-            version: &'static str,
+            version: Version,
             condition: T,
             transport: TransportWithSecret<'a>,
         }
@@ -283,8 +283,8 @@ impl EventSub {
         let secret = rand::rand_hex(10);
 
         let body = CreateSub {
-            name: T::name(),
-            version: T::ver(),
+            name: T::NAME,
+            version: T::VERSION,
             condition: cond,
             transport: TransportWithSecret {
                 transport: self.transport(),
@@ -294,7 +294,7 @@ impl EventSub {
 
         log::trace!(
             "sending POST request for event {:?}:\n\t{:?}",
-            T::name(),
+            T::NAME,
             serde_json::to_string(&body)
         );
 

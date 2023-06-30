@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use std::{time, sync::Arc};
 use surf::{Client, Response, Url, http::Method, RequestBuilder};
 
-use crate::prelude::*;
+use crate::{prelude::*, poll_dbg::PollDbg};
 use crate::retry::retry;
 
 pub type StreamData = (path::PathBuf, AlternativeMedia, Option<VariantStream>);
@@ -27,6 +27,31 @@ pub async fn get(uri: impl Into<Url>, context: &str) -> Result<Response> {
         let req = RequestBuilder::new(Method::Get, uri.clone()).build();
 
         let res = CLIENT.send(req).await
+            .map_err(|e| e.into_inner())
+            .with_context(|| format!("{context} failed"))?;
+        
+        if res.status().is_client_error() {
+            return Err(anyhow!(
+                "{context} returned status {}",
+                res.status()
+            ))
+        }
+
+        Ok(res)
+    }, time::Duration::ZERO, 10, context)
+        .await
+}
+
+pub async fn get2(uri: impl Into<Url>, context: &str) -> Result<Response> {
+    let uri = uri.into();
+    log::trace!("sending {context}: {uri}");
+    let pctx = format!("client for {context}");
+
+    retry(|| async {
+        let req = RequestBuilder::new(Method::Get, uri.clone()).build();
+
+        let fut = PollDbg::new(CLIENT.send(req), &pctx).await;
+        let res = fut.await
             .map_err(|e| e.into_inner())
             .with_context(|| format!("{context} failed"))?;
         
@@ -92,7 +117,7 @@ impl<W: AsyncWrite + Unpin> MediaPlaylistWriter<W> {
 
 pub async fn spawn_downloader<W> (uri: Url) -> Result<(MediaPlaylistWriter<W>, impl Stream<Item = MediaSegment>)> {
     async fn fetch_media(uri: Url) -> Result<MediaPlaylist> {
-        let mut res = get(uri, "request for media playlist").await?;
+        let mut res = get2(uri, "request for media playlist").await?;
 
         let body = res
             .body_bytes()
@@ -131,62 +156,64 @@ pub async fn spawn_downloader<W> (uri: Url) -> Result<(MediaPlaylistWriter<W>, i
         return Ok((mw, rx));
     }
 
-    let _ = task::Builder::new()
-        .name(format!("{}-hls", task::current().name().unwrap_or(&task::current().id().to_string())))
-        .spawn(async move {
-            let mut pos = media.media_sequence + len;
-            let mut tx = tx;
+    let fut = async move {
+        let mut pos = media.media_sequence + len;
+        let mut tx = tx;
 
-            task::sleep(next_poll - time::Instant::now()).await;
+        task::sleep(next_poll - time::Instant::now()).await;
 
-            loop {
-                let ts = time::Instant::now();
-                let media = fetch_media(uri.clone()).await?;
-                let next_poll = ts + time::Duration::from_secs_f32(media.target_duration);
+        loop {
+            let ts = time::Instant::now();
+            let media = PollDbg::new(fetch_media(uri.clone()), "media").await.await?;
+            let next_poll = ts + time::Duration::from_secs_f32(media.target_duration);
 
-                let mut list = media.segments;
+            let mut list = media.segments;
 
-                if list.is_empty() {
-                    let sleep = next_poll - time::Instant::now();
-                    log::debug!("received empty playlist; trying again in {:?}", sleep);
-                    task::sleep(sleep).await;
-                    continue;
-                }
-
-                let len = list.len() as u64;
-                log::trace!("received {len} segments ({pos} - {})", pos + len);
-
-                let skip = match pos.checked_sub(media.media_sequence) {
-                    Some(x) => {
-                        log::trace!("skipping {x} duplicate segments ({} - {pos})", media.media_sequence);
-                        x as usize
-                    }
-                    None => {
-                        log::warn!("media sequence bigger than expected pos ({} > {pos}); stream may not be continuous!", media.media_sequence);
-                        list[0].discontinuity = true;
-                        0
-                    }
-                };
-
-                for e in list.into_iter().skip(skip) {
-                    tx.send(e).await?;
-                }
-
-                pos = media.media_sequence + len as u64;
-
-                if media.end_list {
-                    log::trace!("received ENDLIST; finishing stream");
-                    tx.close_channel();
-                    break;
-                }
-
+            if list.is_empty() {
                 let sleep = next_poll - time::Instant::now();
-                log::trace!("sleeping for {:?}", sleep);
+                log::debug!("received empty playlist; trying again in {:?}", sleep);
                 task::sleep(sleep).await;
+                continue;
             }
 
-            Result::<()>::Ok(())
-        });
+            let len = list.len() as u64;
+            log::trace!("received {len} segments ({pos} - {})", pos + len);
+
+            let skip = match pos.checked_sub(media.media_sequence) {
+                Some(x) => {
+                    log::trace!("skipping {x} duplicate segments ({} - {pos})", media.media_sequence);
+                    x as usize
+                }
+                None => {
+                    log::warn!("media sequence bigger than expected pos ({} > {pos}); stream may not be continuous!", media.media_sequence);
+                    list[0].discontinuity = true;
+                    0
+                }
+            };
+
+            for e in list.into_iter().skip(skip) {
+                tx.send(e).await?;
+            }
+
+            pos = media.media_sequence + len as u64;
+
+            if media.end_list {
+                log::trace!("received ENDLIST; finishing stream");
+                tx.close_channel();
+                break;
+            }
+
+            let sleep = next_poll - time::Instant::now();
+            log::trace!("sleeping for {:?}", sleep);
+            task::sleep(sleep).await;
+        }
+
+        Result::<()>::Ok(())
+    };
+
+    let _ = task::Builder::new()
+        .name(format!("{}-hls", task::current().name().unwrap_or(&task::current().id().to_string())))
+        .spawn(PollDbg::new(fut, "main").await);
 
     Ok((mw, rx))
 }

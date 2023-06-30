@@ -119,9 +119,14 @@ impl User {
 
 impl Clone for User {
     fn clone(&self) -> Self {
+        let details = match self.details.get() {
+            Some(x) => OnceCell::new_with(x.clone()),
+            None => OnceCell::new()
+        };
+
         Self {
             credentials: self.credentials.clone(),
-            details: OnceCell::new_with(self.details.get().cloned()),
+            details,
         }
     }
 }
@@ -203,7 +208,7 @@ async fn _get_user(
              details,
          }| User {
             credentials,
-            details: OnceCell::new_with(Some(Box::new(details))),
+            details: OnceCell::new_with(Box::new(details)),
         },
     ))
 }

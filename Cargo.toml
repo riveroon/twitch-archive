@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-async-once-cell = "0.4"
+async-once-cell = "0.5"
 async-recursion = "1"
 async-std = { version = "1", features = ["unstable"] }
 async-tar = "0.4"
@@ -20,7 +20,7 @@ log = "0.4"
 log4rs = { path = "../log4rs", default_features = false, features = ["async-std", "console_appender", "rolling_file_appender", "compound_policy", "fixed_window_roller", "size_trigger", "pattern_encoder", "threshold_filter", "gzip", "background_rotation"] }
 m3u8-rs = { path = "../m3u8-rs" }
 ngrok = { path = "../ngrok" }
-once_cell = "1.17"
+once_cell = "1"
 rand = "0.8"
 sanitize-filename = "0.4"
 serde = "1"

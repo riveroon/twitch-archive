@@ -6,6 +6,19 @@ pub trait SubscriptionType {
     type Cond: Serialize;
     type Event: DeserializeOwned;
 
-    fn name() -> &'static str;
-    fn ver() -> &'static str;
+    const NAME: &'static str;
+    const VERSION: Version;
+}
+
+
+#[derive(Debug, Serialize)]
+pub struct Version {
+    #[serde(flatten)]
+    inner: &'static str
+}
+
+impl Version {
+    pub(crate) const fn new(inner: &'static str) -> Self {
+        Self { inner }
+    }
 }

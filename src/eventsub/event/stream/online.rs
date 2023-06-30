@@ -5,7 +5,7 @@ use super::super::SubscriptionType;
 use crate::{
     helix::{get_streams, Stream, StreamFilter, User},
     prelude::*,
-    HelixAuth,
+    HelixAuth, eventsub::event::Version,
 };
 
 pub struct Online;
@@ -14,12 +14,8 @@ impl SubscriptionType for Online {
     type Cond = OnlineCond;
     type Event = OnlineEvent;
 
-    fn name() -> &'static str {
-        "stream.online"
-    }
-    fn ver() -> &'static str {
-        "1"
-    }
+    const NAME: &'static str = "stream.online";
+    const VERSION: Version = Version::new("1");
 }
 
 #[derive(Serialize)]

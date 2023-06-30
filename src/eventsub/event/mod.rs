@@ -11,14 +11,22 @@ pub trait SubscriptionType {
 }
 
 
-#[derive(Debug, Serialize)]
+#[derive(Copy, Clone, Debug)]
 pub struct Version {
-    #[serde(flatten)]
     inner: &'static str
 }
 
 impl Version {
     pub(crate) const fn new(inner: &'static str) -> Self {
         Self { inner }
+    }
+}
+
+impl Serialize for Version {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer
+    {
+        serializer.serialize_str(self.inner)    
     }
 }

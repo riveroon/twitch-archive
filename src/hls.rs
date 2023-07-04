@@ -119,8 +119,9 @@ pub async fn spawn_downloader<W> (uri: Url) -> Result<(MediaPlaylistWriter<W>, i
     async fn fetch_media(uri: Url) -> Result<MediaPlaylist> {
         let mut res = get2(uri, "request for media playlist").await?;
 
-        let body = res
-            .body_bytes()
+        let body_fut = PollDbg::new(res.body_bytes(), "body").await;
+
+        let body = body_fut
             .await
             .map_err(|e| e.into_inner().context("failed to retrieve media playlist"))?;
 

@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
 use async_std::{
-    fs, io::{self, BufWriter, WriteExt}, path, task,
+    fs, io::{self, BufWriter, WriteExt}, path, task, future::timeout
 };
 use futures::{SinkExt, AsyncWrite, Stream, io::AllowStdIo, StreamExt, future};
 use m3u8_rs::{AlternativeMedia, AlternativeMediaType, VariantStream, MediaPlaylist, MediaPlaylistType, MediaSegment};
@@ -30,7 +30,7 @@ pub async fn get(uri: impl Into<Url>, context: &str) -> Result<Response> {
             .map_err(|e| e.into_inner())
             .with_context(|| format!("{context} failed"))?;
         
-        if res.status().is_client_error() {
+        if !res.status().is_success() {
             return Err(anyhow!(
                 "{context} returned status {}",
                 res.status()
@@ -38,8 +38,18 @@ pub async fn get(uri: impl Into<Url>, context: &str) -> Result<Response> {
         }
 
         Ok(res)
-    }, time::Duration::ZERO, 10, context)
-        .await
+    }, time::Duration::ZERO, 10, context).await
+}
+
+pub async fn get_bytes(uri: impl Into<Url>, context: &str) -> Result<Vec<u8>> {
+    let uri = uri.into();
+
+    retry(|| async {
+        let mut res = get(uri.clone(), context).await?;
+
+        timeout(time::Duration::from_secs(10), res.body_bytes()).await?
+            .map_err(|e| e.into_inner())
+    }, time::Duration::ZERO, 10, context).await
 }
 
 pub struct MediaPlaylistWriter<W> {
@@ -92,12 +102,8 @@ impl<W: AsyncWrite + Unpin> MediaPlaylistWriter<W> {
 
 pub async fn spawn_downloader<W> (uri: Url) -> Result<(MediaPlaylistWriter<W>, impl Stream<Item = MediaSegment>)> {
     async fn fetch_media(uri: Url) -> Result<MediaPlaylist> {
-        let mut res = get(uri, "request for media playlist").await?;
-
-        let body = res
-            .body_bytes()
-            .await
-            .map_err(|e| e.into_inner().context("failed to retrieve media playlist"))?;
+        let body = get_bytes(uri, "request for media playlist").await
+            .context("failed to retrieve media playlist")?;
 
         let (_, media) = m3u8_rs::parse_media_playlist(&body).map_err(|e| {
             log::error!("failed to parse m3u8 hls media playlist: {e:?}");
@@ -256,12 +262,9 @@ pub async fn download(
 ) -> Result<Option<StreamData>> {
     let master = {
         let uri: Url = uri.as_ref().parse()?;
-        let mut res = get(uri, "request for master playlist").await?;
 
-        let body = res
-            .body_bytes()
-            .await
-            .map_err(|e| e.into_inner().context("failed to recieve master playlist"))?;
+        let body = get_bytes(uri, "request for master playlist").await
+            .context("failed to recieve master playlist")?;
 
         let (_, master) = m3u8_rs::parse_master_playlist(&body).map_err(|e| {
             log::error!("malformed m3u8 hls master playlist: {e:?}");

@@ -66,7 +66,7 @@ pub fn init(file: String, level: LevelFilter, stderr: bool) -> Handle {
 
     if !file.is_empty() {
         let roll = FixedWindowRoller::builder()
-            .build(&format!("{}_{{}}.gz", file.rsplit_once('.').unwrap().0), 8)
+            .build(&format!("{}_{{}}.gz", file.rsplit_once('.').unwrap().0), 16)
             .unwrap();
 
         let trigger = SizeTrigger::new(1073741824);

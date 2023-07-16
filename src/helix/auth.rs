@@ -159,10 +159,14 @@ impl HelixAuth {
     }
 
     pub async fn send_req_json<T: DeserializeOwned>(&self, req: surf::Request) -> Result<T> {
-        self.send_req(req)
+        let body = self.send_req(req)
             .await?
-            .body_json()
+            .body_string()
             .await
-            .map_err(|e| e.into_inner())
+            .map_err(|e| e.into_inner())?;
+
+        log::trace!("{body}");
+        
+        Ok(serde_json::from_str(&body)?)
     }
 }

@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "twitch-archive"
-version = "0.8.3-beta+build.110"
+version = "0.8.4-beta+build.126"
 dependencies = [
  "anyhow",
  "async-once-cell",
